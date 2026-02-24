@@ -18,11 +18,18 @@ Agents run as `claude -p` with full tool access. Optional git checkpoints can be
 
 ## Install
 
-```
+```bash
 npm install -g .
 ```
 
 Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` CLI) and Node 18+.
+
+From this repo directory, that command installs `roundsman` globally on your system. Verify with:
+
+```bash
+which roundsman
+roundsman --help
+```
 
 ## Quickstart
 
