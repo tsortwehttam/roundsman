@@ -1,0 +1,15 @@
+{
+  "name": "roundsman",
+  "version": "0.1.0",
+  "description": "Multi-project AI agent REPL",
+  "bin": {
+    "roundsman": "./roundsman.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
