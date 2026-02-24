@@ -269,8 +269,18 @@ function createProjectConfig(dir, seed) {
 
 function findGremlinDirs(root, maxDepth = MAX_DEPTH, ignoreDirs = new Set(DEFAULT_GLOBAL_CONFIG.ignoreDirs)) {
   const results = [];
+
+  function isGitWorktreesInternalPath(dir) {
+    const parts = path.resolve(dir).split(path.sep).filter((x) => x);
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (parts[i] === ".git" && parts[i + 1] === "worktrees") return true;
+    }
+    return false;
+  }
+
   function walk(dir, depth) {
     if (depth > maxDepth) return;
+    if (isGitWorktreesInternalPath(dir)) return;
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     if (entries.some((e) => e.isFile() && ROUNDSMAN_FILES.includes(e.name))) results.push(dir);
@@ -309,6 +319,21 @@ function isGitWorktree(dir) {
   return r.ok && r.stdout.trim() === "true";
 }
 
+function getGitMeta(dir) {
+  const root = git(["rev-parse", "--show-toplevel"], dir);
+  if (!root.ok || !root.stdout.trim()) return { enabled: false, repoRoot: "", repoName: "", branch: "" };
+  const repoRoot = root.stdout.trim();
+  const repoName = path.basename(repoRoot);
+  const branchResult = git(["branch", "--show-current"], dir);
+  const branch = branchResult.ok && branchResult.stdout.trim() ? branchResult.stdout.trim() : "(detached)";
+  return { enabled: true, repoRoot, repoName, branch };
+}
+
+function formatRepoTag(project) {
+  if (!project.repoName || !project.branch) return project.name;
+  return `${project.repoName}@${project.branch}`;
+}
+
 function setupProject(dir, globalConfig) {
   const configPath = resolveProjectConfigPath(dir);
   if (!configPath) return null;
@@ -329,11 +354,13 @@ function setupProject(dir, globalConfig) {
   if (!config) return null;
   if (config.lock) { console.log(`  [skip] ${dir} (locked)`); return null; }
 
-  let gitEnabled = isGitWorktree(dir);
+  let gitMeta = getGitMeta(dir);
+  let gitEnabled = gitMeta.enabled;
   if (!gitEnabled && globalConfig.checkpoint.autoInitGit) {
     const init = git(["init"], dir);
     if (init.ok) {
-      gitEnabled = isGitWorktree(dir);
+      gitMeta = getGitMeta(dir);
+      gitEnabled = gitMeta.enabled;
       if (gitEnabled) console.log(`  [git init] ${dir}`);
     }
   }
@@ -355,6 +382,9 @@ function setupProject(dir, globalConfig) {
   return {
     dir,
     name: path.basename(dir),
+    repoRoot: gitMeta.repoRoot,
+    repoName: gitMeta.repoName,
+    branch: gitMeta.branch,
     configPath,
     config,
     state: "idle",
@@ -463,10 +493,11 @@ function revertLastTurn(project) {
 // ── Display ────────────────────────────────────────────────
 
 function displayProject(project) {
-  const { config, name, dir } = project;
+  const { config, dir } = project;
+  const tag = formatRepoTag(project);
   rmLog("");
   rmLog(`${"─".repeat(60)}`);
-  rmLog(`  ${name}  (${dir})`);
+  rmLog(`  ${tag}  (${dir})`);
   rmLog(`${"─".repeat(60)}`);
 
   if (config.prompt) rmLog(`  context: ${config.prompt}`);
@@ -484,8 +515,9 @@ function displayProject(project) {
 }
 
 function formatProjectLabel(project) {
-  if (!project.globalConfig.ui.showFullPath) return project.name;
-  return `${project.name} (${project.dir})`;
+  const tag = formatRepoTag(project);
+  if (!project.globalConfig.ui.showFullPath) return tag;
+  return `${tag} (${project.dir})`;
 }
 
 function displayLastResult(project) {
@@ -527,7 +559,7 @@ function displayStatus(projects) {
     const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : "✗";
     const loop = p.loop ? ` loop ${p.loop.done}/${p.loop.max}` : "";
     const snooze = p.state === "snoozed" ? ` ${formatMsShort(p.snoozeUntil - Date.now())}` : "";
-    rmLog(`  ${icon} ${p.name.padEnd(30)} ${p.state}${snooze}${loop}`);
+    rmLog(`  ${icon} ${formatRepoTag(p).padEnd(30)} ${p.state}${snooze}${loop}`);
   }
   rmLog("");
 }
@@ -784,7 +816,7 @@ function displayStartupConfig(globalConfig, roots, projects) {
   rmLog(`  checkpoints: ${globalConfig.checkpoint.enabled ? "on" : "off"} (git: ${active}/${total} projects)`);
   rmLog(`  autoInitGit: ${globalConfig.checkpoint.autoInitGit ? "on" : "off"}`);
   rmLog("  round-robin:");
-  for (const p of projects) rmLog(`    - ${p.name} (${p.dir})`);
+  for (const p of projects) rmLog(`    - ${formatRepoTag(p)} (${p.dir})`);
   rmLog("");
 }
 
@@ -796,7 +828,7 @@ function displayLoops(projects) {
   }
   rmLog("");
   for (const p of active) {
-    rmLog(`  ${p.name}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
+    rmLog(`  ${formatRepoTag(p)}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
   }
   rmLog("");
 }
@@ -806,7 +838,11 @@ function findProjectBySelector(projects, selector) {
   if (!q) return { kind: "none", matches: [] };
   const exact = projects.filter((p) => p.name.toLowerCase() === q);
   if (exact.length === 1) return { kind: "one", matches: exact };
-  const partial = projects.filter((p) => p.name.toLowerCase().includes(q) || p.dir.toLowerCase().includes(q));
+  const partial = projects.filter((p) => (
+    p.name.toLowerCase().includes(q)
+    || formatRepoTag(p).toLowerCase().includes(q)
+    || p.dir.toLowerCase().includes(q)
+  ));
   if (partial.length === 1) return { kind: "one", matches: partial };
   if (exact.length > 1) return { kind: "many", matches: exact };
   if (partial.length > 1) return { kind: "many", matches: partial };
@@ -901,6 +937,37 @@ function buildScanOutput(roots, dirs) {
       marker: resolveProjectConfigPath(dir),
     })),
   };
+}
+
+function collectDuplicateRepoBranches(projects) {
+  const map = new Map();
+  for (const p of projects) {
+    if (!p.gitEnabled || !p.repoRoot || !p.branch) continue;
+    const key = `${p.repoRoot}::${p.branch}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(p);
+  }
+  return Array.from(map.values())
+    .filter((list) => list.length > 1)
+    .map((list) => ({
+      repoRoot: list[0].repoRoot,
+      repoName: list[0].repoName,
+      branch: list[0].branch,
+      projects: list,
+    }));
+}
+
+function displayDuplicateRepoBranchWarnings(projects) {
+  const groups = collectDuplicateRepoBranches(projects);
+  if (!groups.length) return;
+  rmLog("");
+  rmLog("warning: multiple projects share the same repo+branch:");
+  for (const g of groups) {
+    rmLog(`  ${g.repoName}@${g.branch}`);
+    for (const p of g.projects) rmLog(`    - ${p.dir}`);
+  }
+  rmLog("consider separate branches/worktrees to avoid overlap.");
+  rmLog("");
 }
 
 function displayScanOutput(roots, dirs, asJson) {
@@ -1157,6 +1224,7 @@ async function main() {
     if (p) projects.push(p);
   }
   if (!projects.length) { rmLog("All projects locked or invalid."); process.exit(0); }
+  displayDuplicateRepoBranchWarnings(projects);
 
   // REPL
   const rl = createRl();
@@ -1305,8 +1373,10 @@ if (require.main === module) {
 module.exports = {
   buildPrompt,
   buildProjectConfig,
+  collectDuplicateRepoBranches,
   createProjectConfig,
   dropProject,
+  formatRepoTag,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,

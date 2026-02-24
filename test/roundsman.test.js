@@ -7,8 +7,10 @@ const path = require("node:path");
 const {
   buildPrompt,
   buildProjectConfig,
+  collectDuplicateRepoBranches,
   createProjectConfig,
   dropProject,
+  formatRepoTag,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
@@ -189,6 +191,24 @@ test("buildProjectConfig applies prompt and todos", () => {
     doing: [],
     done: [],
   });
+});
+
+test("formatRepoTag prefers repo@branch when available", () => {
+  assert.equal(formatRepoTag({ name: "a", repoName: "repo", branch: "feat-x" }), "repo@feat-x");
+  assert.equal(formatRepoTag({ name: "a", repoName: "", branch: "" }), "a");
+});
+
+test("collectDuplicateRepoBranches groups matching repo+branch", () => {
+  const groups = collectDuplicateRepoBranches([
+    { gitEnabled: true, repoRoot: "/r/a", repoName: "a", branch: "main", dir: "/r/a/w1" },
+    { gitEnabled: true, repoRoot: "/r/a", repoName: "a", branch: "main", dir: "/r/a/w2" },
+    { gitEnabled: true, repoRoot: "/r/a", repoName: "a", branch: "feat", dir: "/r/a/w3" },
+    { gitEnabled: false, repoRoot: "", repoName: "", branch: "", dir: "/tmp/x" },
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].repoName, "a");
+  assert.equal(groups[0].branch, "main");
+  assert.deepEqual(groups[0].projects.map((p) => p.dir), ["/r/a/w1", "/r/a/w2"]);
 });
 
 test("createProjectConfig fails when marker already exists", () => {

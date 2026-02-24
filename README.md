@@ -125,6 +125,8 @@ At startup, roundsman prints effective config + the projects in round-robin orde
 
 `--no-color` disables ANSI color output (also respects `NO_COLOR`).
 
+When projects are in git worktrees, roundsman labels them as `repo@branch` and warns if multiple entries point to the same `repo+branch`.
+
 ## Safety defaults
 
 - Checkpoints are off by default (`checkpoint.enabled: false`)
