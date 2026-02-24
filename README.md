@@ -35,8 +35,14 @@ roundsman --help
 
 ```bash
 mkdir -p ~/Code/my-project
-touch ~/Code/my-project/roundsman
+roundsman add ~/Code/my-project
 roundsman ~/Code
+```
+
+Interactive setup:
+
+```bash
+roundsman init ~/Code/my-project
 ```
 
 ## Global config
@@ -75,6 +81,12 @@ Notes:
 
 ```
 roundsman [path]
+roundsman add [dir]
+roundsman init [dir]
+roundsman list [path]
+roundsman [path] --dry-run
+roundsman [path] --json
+roundsman [path] --no-color
 ```
 
 Scans `path` (default: `~`) for directories containing `roundsman.json`, `roundsman`, or `.roundsman`. For each project, you get a prompt:
@@ -91,6 +103,27 @@ Scans `path` (default: `~`) for directories containing `roundsman.json`, `rounds
 ```
 
 At startup, roundsman prints effective config + the projects in round-robin order, then waits for enter before the loop begins.
+
+`roundsman add [dir]` creates a `roundsman.json` marker file in `dir` (default: current directory) with this default config:
+
+```json
+{
+  "prompt": "",
+  "todos": [],
+  "doing": [],
+  "done": []
+}
+```
+
+`roundsman init [dir]` does the same but asks for project prompt and initial todos first.
+
+`roundsman list [path]` scans and prints discovered projects, then exits.
+
+`--dry-run` scans and prints without entering the REPL.
+
+`--json` emits scan results as JSON (works with `list` and `--dry-run`).
+
+`--no-color` disables ANSI color output (also respects `NO_COLOR`).
 
 ## Safety defaults
 
@@ -119,6 +152,7 @@ At startup, roundsman prints effective config + the projects in round-robin orde
 | `/revert` | Git revert the last agent turn |
 | `/quit` | Kill running agents and exit |
 | `/status` | Show all projects and their states |
+| `/help` | Show available REPL commands |
 
 Pressing enter defaults to `/work`.
 

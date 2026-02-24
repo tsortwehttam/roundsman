@@ -1,16 +1,23 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   buildPrompt,
+  buildProjectConfig,
+  createProjectConfig,
   dropProject,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
   normalizeSession,
   parseAction,
+  parseCliArgs,
   parseDurationMs,
   parseLoopCommand,
+  parseTodoInput,
   refreshSnoozed,
   snoozeProject,
   stopLoop,
@@ -84,6 +91,46 @@ test("parseAction supports slash syntax and aliases", () => {
   assert.equal(parseAction("q"), "q");
 });
 
+test("parseTodoInput splits comma separated todos", () => {
+  assert.deepEqual(parseTodoInput("a, b,  c "), ["a", "b", "c"]);
+  assert.deepEqual(parseTodoInput(""), []);
+});
+
+test("parseCliArgs parses commands and flags", () => {
+  assert.deepEqual(parseCliArgs(["add", "x"]), {
+    command: "add",
+    pathArg: "x",
+    help: false,
+    json: false,
+    dryRun: false,
+    noColor: false,
+  });
+  assert.deepEqual(parseCliArgs(["list", "--json", "/tmp"]), {
+    command: "list",
+    pathArg: "/tmp",
+    help: false,
+    json: true,
+    dryRun: false,
+    noColor: false,
+  });
+  assert.deepEqual(parseCliArgs(["--dry-run", "~/Code"]), {
+    command: "run",
+    pathArg: "~/Code",
+    help: false,
+    json: false,
+    dryRun: true,
+    noColor: false,
+  });
+  assert.deepEqual(parseCliArgs(["list", "--no-color"]), {
+    command: "list",
+    pathArg: "",
+    help: false,
+    json: false,
+    dryRun: false,
+    noColor: true,
+  });
+});
+
 test("normalizeGlobalConfig keeps model and api key env var", () => {
   const g = normalizeGlobalConfig({
     defaultModel: "claude-sonnet-4-5",
@@ -118,6 +165,46 @@ test("stopLoop is loop-only", () => {
   assert.equal(stopLoop(p, q, "requested"), false);
   assert.equal(killed, 0);
   assert.equal(q.length, 0);
+});
+
+test("createProjectConfig writes default roundsman.json", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roundsman-test-"));
+  const out = createProjectConfig(dir);
+  assert.equal(out.ok, true);
+  assert.equal(out.configPath, path.join(dir, "roundsman.json"));
+  const raw = fs.readFileSync(out.configPath, "utf-8");
+  assert.deepEqual(JSON.parse(raw), {
+    prompt: "",
+    todos: [],
+    doing: [],
+    done: [],
+  });
+});
+
+test("buildProjectConfig applies prompt and todos", () => {
+  const out = buildProjectConfig({ prompt: "  app  ", todos: [" a ", ""] });
+  assert.deepEqual(out, {
+    prompt: "app",
+    todos: ["a"],
+    doing: [],
+    done: [],
+  });
+});
+
+test("createProjectConfig fails when marker already exists", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roundsman-test-"));
+  fs.writeFileSync(path.join(dir, ".roundsman"), "");
+  const out = createProjectConfig(dir);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /project marker already exists/);
+});
+
+test("createProjectConfig creates missing target directories", () => {
+  const dir = path.join(os.tmpdir(), `roundsman-missing-${Date.now()}`);
+  const out = createProjectConfig(dir);
+  assert.equal(out.ok, true);
+  assert.equal(fs.existsSync(dir), true);
+  assert.equal(fs.existsSync(path.join(dir, "roundsman.json")), true);
 });
 
 test("stopLoop kills loop process and requeues", () => {

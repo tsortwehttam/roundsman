@@ -10,6 +10,12 @@ const os = require("os");
 const ROUNDSMAN_FILES = ["roundsman.json", "roundsman", ".roundsman"];
 const MAX_DEPTH = 10;
 const MAX_HISTORY = 20;
+const DEFAULT_PROJECT_CONFIG = {
+  prompt: "",
+  todos: [],
+  doing: [],
+  done: [],
+};
 const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session"]);
 const DEFAULT_GLOBAL_CONFIG = {
   scanRoots: [],
@@ -23,6 +29,17 @@ const DEFAULT_GLOBAL_CONFIG = {
   checkpoint: { enabled: false, preTurn: true, postTurn: true, autoInitGit: false },
   claudeBin: "claude",
   ui: { showFullPath: true, previewChars: 200 },
+};
+const PROJECT_TAG_WIDTH = 8;
+const ANSI = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  gray: "\x1b[90m",
+  cyan: "\x1b[36m",
+};
+const PROJECT_COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m"];
+const OUTPUT = {
+  color: true,
 };
 
 // ── Utilities ──────────────────────────────────────────────
@@ -65,6 +82,56 @@ function expandHomePath(p) {
   if (p === "~") return os.homedir();
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+function setOutputColor(enabled) {
+  OUTPUT.color = enabled === true;
+}
+
+function style(text, code) {
+  if (!OUTPUT.color || !code) return text;
+  return `${code}${text}${ANSI.reset}`;
+}
+
+function hashText(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = (h * 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function fitTag(text, width = PROJECT_TAG_WIDTH) {
+  const s = String(text || "").slice(0, width);
+  return s.padEnd(width, " ");
+}
+
+function getProjectPrefix(project) {
+  const key = project && typeof project === "object" ? (project.dir || project.name || "") : "";
+  const tag = fitTag(project && project.name ? project.name : "agent");
+  const idx = PROJECT_COLORS.length ? hashText(key) % PROJECT_COLORS.length : 0;
+  const color = PROJECT_COLORS[idx] || "";
+  return `${style(`[${tag}]`, color)} ${style(">", color)}`;
+}
+
+function rmLog(msg = "") {
+  if (!msg) {
+    process.stdout.write("\n");
+    return;
+  }
+  const prefix = `${style("[rm]", `${ANSI.dim}${ANSI.gray}`)} `;
+  for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
+}
+
+function userLog(msg = "") {
+  const prefix = `${style("[you]", ANSI.cyan)} ${style(">", ANSI.cyan)} `;
+  for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
+}
+
+function agentLog(project, msg = "") {
+  const prefix = `${getProjectPrefix(project)} `;
+  for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
 }
 
 function resolveGlobalConfigPath() {
@@ -174,6 +241,28 @@ function saveConfig(configPath, config) {
   const tmp = `${configPath}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
   fs.renameSync(tmp, configPath);
+}
+
+function buildProjectConfig(seed) {
+  const raw = seed && typeof seed === "object" && !Array.isArray(seed) ? seed : {};
+  const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
+  const todos = normalizeList(raw.todos).map((x) => x.trim()).filter((x) => x);
+  return {
+    ...DEFAULT_PROJECT_CONFIG,
+    prompt,
+    todos,
+  };
+}
+
+function createProjectConfig(dir, seed) {
+  const target = path.resolve(dir || process.cwd());
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+  if (!fs.statSync(target).isDirectory()) return { ok: false, error: `not a directory: ${target}` };
+  const markerPath = resolveProjectConfigPath(target);
+  if (markerPath) return { ok: false, error: `project marker already exists: ${markerPath}` };
+  const configPath = path.join(target, "roundsman.json");
+  saveConfig(configPath, buildProjectConfig(seed));
+  return { ok: true, configPath };
 }
 
 // ── Discovery & Setup ──────────────────────────────────────
@@ -375,22 +464,23 @@ function revertLastTurn(project) {
 
 function displayProject(project) {
   const { config, name, dir } = project;
-  console.log(`\n${"─".repeat(60)}`);
-  console.log(`  ${name}  (${dir})`);
-  console.log(`${"─".repeat(60)}`);
+  rmLog("");
+  rmLog(`${"─".repeat(60)}`);
+  rmLog(`  ${name}  (${dir})`);
+  rmLog(`${"─".repeat(60)}`);
 
-  if (config.prompt) console.log(`  context: ${config.prompt}`);
+  if (config.prompt) rmLog(`  context: ${config.prompt}`);
 
-  if (config.todos.length) console.log(`  todos:   ${config.todos.join(" | ")}`);
-  if (config.doing.length) console.log(`  doing:   ${config.doing.join(" | ")}`);
-  if (config.done.length) console.log(`  done:    ${config.done.join(" | ")}`);
+  if (config.todos.length) rmLog(`  todos:   ${config.todos.join(" | ")}`);
+  if (config.doing.length) rmLog(`  doing:   ${config.doing.join(" | ")}`);
+  if (config.done.length) rmLog(`  done:    ${config.done.join(" | ")}`);
 
-  if (config.session.summary) console.log(`  summary: ${config.session.summary}`);
-  console.log(`  turn:    ${config.session.turn}`);
+  if (config.session.summary) rmLog(`  summary: ${config.session.summary}`);
+  rmLog(`  turn:    ${config.session.turn}`);
 
   const meta = Object.entries(config).filter(([k]) => !KNOWN_KEYS.has(k));
-  for (const [k, v] of meta) console.log(`  ${k}: ${stringifyMeta(v)}`);
-  console.log();
+  for (const [k, v] of meta) rmLog(`  ${k}: ${stringifyMeta(v)}`);
+  rmLog("");
 }
 
 function formatProjectLabel(project) {
@@ -400,42 +490,46 @@ function formatProjectLabel(project) {
 
 function displayLastResult(project) {
   const hist = project.config.session.history;
-  if (!hist.length) { console.log("  (no turns yet)"); return; }
+  if (!hist.length) { rmLog("  (no turns yet)"); return; }
   const last = hist[hist.length - 1];
-  console.log(`\n  Project: ${formatProjectLabel(project)}`);
-  console.log(`  Turn ${project.config.session.turn} (${last.at})`);
-  console.log(`  Input: ${last.input || "(none)"}`);
-  console.log(`  Cost: $${last.cost.toFixed(4)} | Agent turns: ${last.turns}`);
-  console.log(`${"─".repeat(60)}`);
-  console.log(last.result || "(empty result)");
-  console.log(`${"─".repeat(60)}\n`);
+  rmLog("");
+  rmLog(`  Project: ${formatProjectLabel(project)}`);
+  rmLog(`  Turn ${project.config.session.turn} (${last.at})`);
+  rmLog(`  Input: ${last.input || "(none)"}`);
+  rmLog(`  Cost: $${last.cost.toFixed(4)} | Agent turns: ${last.turns}`);
+  rmLog(`${"─".repeat(60)}`);
+  agentLog(project, last.result || "(empty result)");
+  rmLog(`${"─".repeat(60)}`);
+  rmLog("");
 }
 
 function displayLog(project) {
   const hist = project.config.session.history;
-  if (!hist.length) { console.log("  (no turns yet)"); return; }
-  console.log(`\n  Project: ${formatProjectLabel(project)}`);
+  if (!hist.length) { rmLog("  (no turns yet)"); return; }
+  rmLog("");
+  rmLog(`  Project: ${formatProjectLabel(project)}`);
   for (let i = 0; i < hist.length; i++) {
     const h = hist[i];
     const preview = (h.result || "").slice(0, 80).replace(/\n/g, " ");
-    console.log(`  ${i + 1}. ${h.at}  $${h.cost.toFixed(4)}  ${h.turns}t`);
-    console.log(`     in:  ${h.input || "(none)"}`);
-    console.log(`     out: ${preview}`);
+    rmLog(`  ${i + 1}. ${h.at}  $${h.cost.toFixed(4)}  ${h.turns}t`);
+    rmLog(`     in:  ${h.input || "(none)"}`);
+    agentLog(project, preview || "(empty result)");
   }
-  console.log();
+  rmLog("");
 }
 
 function displayStatus(projects) {
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("  STATUS");
-  console.log(`${"═".repeat(60)}`);
+  rmLog("");
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("  STATUS");
+  rmLog(`${"═".repeat(60)}`);
   for (const p of projects) {
     const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : "✗";
     const loop = p.loop ? ` loop ${p.loop.done}/${p.loop.max}` : "";
     const snooze = p.state === "snoozed" ? ` ${formatMsShort(p.snoozeUntil - Date.now())}` : "";
-    console.log(`  ${icon} ${p.name.padEnd(30)} ${p.state}${snooze}${loop}`);
+    rmLog(`  ${icon} ${p.name.padEnd(30)} ${p.state}${snooze}${loop}`);
   }
-  console.log();
+  rmLog("");
 }
 
 // ── Background Agent ───────────────────────────────────────
@@ -576,6 +670,37 @@ function parseCommand(action) {
   return { cmd: s.slice(0, i).toLowerCase(), arg: s.slice(i + 1).trim() };
 }
 
+function parseTodoInput(input) {
+  if (!input || typeof input !== "string") return [];
+  return input
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x);
+}
+
+function parseCliArgs(args) {
+  const raw = Array.isArray(args) ? args : [];
+  let help = false;
+  let json = false;
+  let dryRun = false;
+  let noColor = false;
+  const pos = [];
+
+  for (const x of raw) {
+    if (x === "--help" || x === "-h") { help = true; continue; }
+    if (x === "--json") { json = true; continue; }
+    if (x === "--dry-run") { dryRun = true; continue; }
+    if (x === "--no-color") { noColor = true; continue; }
+    pos.push(x);
+  }
+
+  const lead = pos[0] || "";
+  if (lead === "add" || lead === "init" || lead === "list") {
+    return { command: lead, pathArg: pos[1] || "", help, json, dryRun, noColor };
+  }
+  return { command: "run", pathArg: lead, help, json, dryRun, noColor };
+}
+
 function parseDurationMs(input) {
   const s = input.trim().toLowerCase();
   const m = s.match(/^(\d+)\s*([smhd]?)$/);
@@ -632,46 +757,48 @@ function getProjectUsage(project) {
 }
 
 function displayUsage(projects, totalCost) {
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("  USAGE");
-  console.log(`${"═".repeat(60)}`);
-  console.log(`  total: $${totalCost.toFixed(4)}`);
+  rmLog("");
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("  USAGE");
+  rmLog(`${"═".repeat(60)}`);
+  rmLog(`  total: $${totalCost.toFixed(4)}`);
   for (const p of projects) {
     const cost = getProjectUsage(p);
     const turns = p.config.session.history.length;
-    console.log(`  ${p.name.padEnd(30)} $${cost.toFixed(4)}  ${turns} turns`);
+    rmLog(`  ${p.name.padEnd(30)} $${cost.toFixed(4)}  ${turns} turns`);
   }
-  console.log();
+  rmLog("");
 }
 
 function displayStartupConfig(globalConfig, roots, projects) {
   const active = projects.filter((p) => p.gitEnabled).length;
   const total = projects.length;
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("  CONFIG");
-  console.log(`${"═".repeat(60)}`);
-  console.log(`  roots: ${roots.join(" | ")}`);
-  console.log(`  maxDepth: ${globalConfig.maxDepth} | maxHistory: ${globalConfig.maxHistory}`);
-  console.log(`  model: ${globalConfig.defaultModel || "(cli default)"}`);
-  console.log(`  permission: ${globalConfig.defaultPermissionMode}`);
-  console.log(`  checkpoints: ${globalConfig.checkpoint.enabled ? "on" : "off"} (git: ${active}/${total} projects)`);
-  console.log(`  autoInitGit: ${globalConfig.checkpoint.autoInitGit ? "on" : "off"}`);
-  console.log("  round-robin:");
-  for (const p of projects) console.log(`    - ${p.name} (${p.dir})`);
-  console.log();
+  rmLog("");
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("  CONFIG");
+  rmLog(`${"═".repeat(60)}`);
+  rmLog(`  roots: ${roots.join(" | ")}`);
+  rmLog(`  maxDepth: ${globalConfig.maxDepth} | maxHistory: ${globalConfig.maxHistory}`);
+  rmLog(`  model: ${globalConfig.defaultModel || "(cli default)"}`);
+  rmLog(`  permission: ${globalConfig.defaultPermissionMode}`);
+  rmLog(`  checkpoints: ${globalConfig.checkpoint.enabled ? "on" : "off"} (git: ${active}/${total} projects)`);
+  rmLog(`  autoInitGit: ${globalConfig.checkpoint.autoInitGit ? "on" : "off"}`);
+  rmLog("  round-robin:");
+  for (const p of projects) rmLog(`    - ${p.name} (${p.dir})`);
+  rmLog("");
 }
 
 function displayLoops(projects) {
   const active = projects.filter((p) => p.loop);
   if (!active.length) {
-    console.log("  (no active loops)");
+    rmLog("  (no active loops)");
     return;
   }
-  console.log();
+  rmLog("");
   for (const p of active) {
-    console.log(`  ${p.name}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
+    rmLog(`  ${p.name}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
   }
-  console.log();
+  rmLog("");
 }
 
 function findProjectBySelector(projects, selector) {
@@ -727,135 +854,200 @@ function snoozeProject(project, queue, ms) {
   if (i >= 0) queue.splice(i, 1);
 }
 
-async function runCommand(ctx) {
-  const {
-    cmd,
-    arg,
-    actionRaw,
-    project,
-    projects,
-    queue,
-    rl,
-    totalCost,
-    runtime,
-    onAgentDone,
-  } = ctx;
+const REPL_ALIASES = {
+  q: "quit",
+  s: "drop",
+  skip: "drop",
+  w: "work",
+  f: "fresh",
+  clear: "fresh",
+  v: "view",
+  l: "log",
+  r: "revert",
+  cost: "usage",
+};
 
-  if (cmd === "q" || cmd === "quit") return "quit";
-  if (cmd === "status") { displayStatus(projects); return "handled"; }
-  if (cmd === "loops") { displayLoops(projects); return "handled"; }
-  if (cmd === "usage" || cmd === "cost") { displayUsage(projects, totalCost); return "handled"; }
+function showNoProjectsFound(roots) {
+  rmLog("No projects found.");
+  if (!roots.length) return;
+  const ex = roots[0];
+  rmLog("");
+  rmLog("Try:");
+  rmLog(`  roundsman add ${path.join(ex, "my-project")}`);
+  rmLog(`  roundsman ${ex}`);
+}
 
-  if (cmd === "model") {
-    const next = arg.trim();
-    if (!next) console.log(`  → model: ${runtime.model || "(default cli model)"}`);
+function resolveScanRoots(pathArg, globalConfig) {
+  if (pathArg) return [path.resolve(pathArg)];
+  return globalConfig.scanRoots.length ? globalConfig.scanRoots : [os.homedir()];
+}
+
+function scanProjectDirs(roots, globalConfig) {
+  const ignore = new Set(globalConfig.ignoreDirs);
+  const dirSet = new Set();
+  for (const root of roots) {
+    const found = findGremlinDirs(root, globalConfig.maxDepth, ignore);
+    for (const dir of found) dirSet.add(dir);
+  }
+  return Array.from(dirSet);
+}
+
+function buildScanOutput(roots, dirs) {
+  return {
+    roots,
+    count: dirs.length,
+    projects: dirs.map((dir) => ({
+      dir,
+      marker: resolveProjectConfigPath(dir),
+    })),
+  };
+}
+
+function displayScanOutput(roots, dirs, asJson) {
+  const out = buildScanOutput(roots, dirs);
+  if (asJson) {
+    console.log(`${JSON.stringify(out, null, 2)}`);
+    return;
+  }
+  for (const root of roots) rmLog(`Scanning ${root} for ${ROUNDSMAN_FILES.join(" | ")}...`);
+  rmLog("");
+  if (!dirs.length) {
+    showNoProjectsFound(roots);
+    return;
+  }
+  rmLog(`Found ${dirs.length} project(s):`);
+  rmLog("");
+  for (const row of out.projects) rmLog(`  → ${row.dir}`);
+}
+
+function displayReplHelp() {
+  rmLog("  /work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
+}
+
+function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel) {
+  const { project, projects, queue } = ctx;
+  if (!sel || sel === "current" || sel === "this") {
+    if (!apply(project, queue)) rmLog(`  → ${missingLabel} ${project.name}`);
+    return "handled";
+  }
+  if (sel === "all") {
+    const count = projects.filter((p) => apply(p, queue)).length;
+    if (!count) rmLog(`  → ${missingAllLabel}`);
+    return "handled";
+  }
+  const found = findProjectBySelector(projects, sel);
+  if (found.kind === "none") {
+    rmLog(`  → no project matched "${sel}"`);
+    return "handled";
+  }
+  if (found.kind === "many") {
+    rmLog(`  → ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
+    return "handled";
+  }
+  if (!apply(found.matches[0], queue)) rmLog(`  → ${missingLabel} ${found.matches[0].name}`);
+  return "handled";
+}
+
+const REPL_COMMANDS = {
+  quit: async function quit() { return "quit"; },
+  status: async function status(ctx) { displayStatus(ctx.projects); return "handled"; },
+  loops: async function loops(ctx) { displayLoops(ctx.projects); return "handled"; },
+  usage: async function usage(ctx) { displayUsage(ctx.projects, ctx.totalCost); return "handled"; },
+  help: async function help() { displayReplHelp(); return "handled"; },
+  model: async function model(ctx) {
+    const next = ctx.arg.trim();
+    if (!next) rmLog(`  → model: ${ctx.runtime.model || "(default cli model)"}`);
     else if (next.toLowerCase() === "none") {
-      runtime.model = "";
-      console.log("  → cleared runtime model override");
+      ctx.runtime.model = "";
+      rmLog("  → cleared runtime model override");
     } else {
-      runtime.model = next;
-      console.log(`  → runtime model set to ${runtime.model}`);
+      ctx.runtime.model = next;
+      rmLog(`  → runtime model set to ${ctx.runtime.model}`);
     }
     return "handled";
-  }
-
-  if (cmd === "stop") {
-    const sel = arg.trim();
-    if (!sel || sel === "current" || sel === "this") {
-      if (!stopLoop(project, queue, "requested")) console.log(`  → no active loop for ${project.name}`);
-      return "handled";
-    }
-    if (sel === "all") {
-      const c = projects.filter((p) => stopLoop(p, queue, "requested")).length;
-      if (!c) console.log("  → no active loops to stop");
-      return "handled";
-    }
-    const found = findProjectBySelector(projects, sel);
-    if (found.kind === "none") { console.log(`  → no project matched "${sel}"`); return "handled"; }
-    if (found.kind === "many") {
-      console.log(`  → ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
-      return "handled";
-    }
-    if (!stopLoop(found.matches[0], queue, "requested")) console.log(`  → no active loop for ${found.matches[0].name}`);
+  },
+  stop: async function stop(ctx) {
+    const sel = ctx.arg.trim();
+    return runScopedProjectCommand(
+      ctx,
+      sel,
+      (p, queue) => stopLoop(p, queue, "requested"),
+      "no active loop for",
+      "no active loops to stop",
+    );
+  },
+  kill: async function kill(ctx) {
+    const sel = ctx.arg.trim();
+    return runScopedProjectCommand(
+      ctx,
+      sel,
+      (p, queue) => killProject(p, queue, "requested"),
+      "no running agent for",
+      "no running agents to kill",
+    );
+  },
+  drop: async function drop(ctx) {
+    dropProject(ctx.project, ctx.queue);
+    rmLog(`  → dropped ${ctx.project.name}`);
     return "handled";
-  }
-
-  if (cmd === "kill") {
-    const sel = arg.trim();
-    if (!sel || sel === "current" || sel === "this") {
-      if (!killProject(project, queue, "requested")) console.log(`  → no running agent for ${project.name}`);
-      return "handled";
-    }
-    if (sel === "all") {
-      const c = projects.filter((p) => killProject(p, queue, "requested")).length;
-      if (!c) console.log("  → no running agents to kill");
-      return "handled";
-    }
-    const found = findProjectBySelector(projects, sel);
-    if (found.kind === "none") { console.log(`  → no project matched "${sel}"`); return "handled"; }
-    if (found.kind === "many") {
-      console.log(`  → ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
-      return "handled";
-    }
-    if (!killProject(found.matches[0], queue, "requested")) console.log(`  → no running agent for ${found.matches[0].name}`);
-    return "handled";
-  }
-
-  if (cmd === "s" || cmd === "skip" || cmd === "drop") {
-    dropProject(project, queue);
-    console.log(`  → dropped ${project.name}`);
-    return "handled";
-  }
-
-  if (cmd === "snooze") {
-    const ms = parseDurationMs(arg);
+  },
+  snooze: async function snooze(ctx) {
+    const ms = parseDurationMs(ctx.arg);
     if (!ms) {
-      console.log("  → usage: /snooze <n>[s|m|h|d]  (default unit: minutes)");
+      rmLog("  → usage: /snooze <n>[s|m|h|d]  (default unit: minutes)");
       return "handled";
     }
-    snoozeProject(project, queue, ms);
-    console.log(`  → snoozed ${project.name} for ${formatMsShort(ms)}`);
+    snoozeProject(ctx.project, ctx.queue, ms);
+    rmLog(`  → snoozed ${ctx.project.name} for ${formatMsShort(ms)}`);
     return "handled";
-  }
-
-  if (cmd === "f" || cmd === "fresh" || cmd === "clear") {
-    stopLoop(project, queue, "session reset");
-    resetSession(project);
-    console.log(`  → reset session for ${project.name} (new sessionId, history cleared)`);
+  },
+  fresh: async function fresh(ctx) {
+    stopLoop(ctx.project, ctx.queue, "session reset");
+    resetSession(ctx.project);
+    rmLog(`  → reset session for ${ctx.project.name} (new sessionId, history cleared)`);
     return "handled";
-  }
-
-  if (cmd === "v" || cmd === "view") { displayLastResult(project); return "handled"; }
-  if (cmd === "l" || cmd === "log") { displayLog(project); return "handled"; }
-
-  if (cmd === "r" || cmd === "revert") {
-    const err = revertLastTurn(project);
-    if (err) console.log(`  → revert failed: ${err}`);
-    else console.log(`  → reverted last turn for ${project.name}`);
+  },
+  view: async function view(ctx) { displayLastResult(ctx.project); return "handled"; },
+  log: async function log(ctx) { displayLog(ctx.project); return "handled"; },
+  revert: async function revert(ctx) {
+    const err = revertLastTurn(ctx.project);
+    if (err) rmLog(`  → revert failed: ${err}`);
+    else rmLog(`  → reverted last turn for ${ctx.project.name}`);
     return "handled";
-  }
-
-  const loop = parseLoopCommand(actionRaw);
-  if (loop) {
-    project.loop = { max: loop.max, goal: loop.goal, done: 0 };
-    console.log(`  → starting loop ${project.name}: 1/${loop.max} "${loop.goal}"`);
-    spawnAgent(project, loop.goal, onAgentDone, runtime.model);
-    const i = queue.indexOf(project);
-    if (i >= 0) queue.splice(i, 1);
+  },
+  loop: async function loop(ctx) {
+    const loop = parseLoopCommand(ctx.actionRaw);
+    if (!loop) {
+      rmLog("  → usage: /loop <n> <goal>");
+      return "handled";
+    }
+    ctx.project.loop = { max: loop.max, goal: loop.goal, done: 0 };
+    rmLog(`  → starting loop ${ctx.project.name}: 1/${loop.max} "${loop.goal}"`);
+    spawnAgent(ctx.project, loop.goal, ctx.onAgentDone, ctx.runtime.model);
+    const i = ctx.queue.indexOf(ctx.project);
+    if (i >= 0) ctx.queue.splice(i, 1);
     return "handled";
-  }
-
-  if (cmd === "w" || cmd === "work") {
-    const input = (await ask(rl, "  what to work on > ")).trim();
-    if (!input) { console.log("  → no input, skipping"); return "handled"; }
-    console.log(`  → starting agent for ${project.name}...`);
-    spawnAgent(project, input, onAgentDone, runtime.model);
-    const i = queue.indexOf(project);
-    if (i >= 0) queue.splice(i, 1);
+  },
+  work: async function work(ctx) {
+    const input = (await ask(ctx.rl, "  what to work on > ")).trim();
+    if (!input) {
+      rmLog("  → no input, skipping");
+      return "handled";
+    }
+    userLog(input);
+    rmLog(`  → starting agent for ${ctx.project.name}...`);
+    spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
+    const i = ctx.queue.indexOf(ctx.project);
+    if (i >= 0) ctx.queue.splice(i, 1);
     return "handled";
-  }
+  },
+};
 
-  return "unknown";
+async function runCommand(ctx) {
+  const key = REPL_ALIASES[ctx.cmd] || ctx.cmd;
+  const run = REPL_COMMANDS[key];
+  if (!run) return "unknown";
+  return run(ctx);
 }
 
 function showHelp() {
@@ -865,11 +1057,26 @@ function showHelp() {
     "",
     "Usage:",
     "  roundsman [path]",
+    "  roundsman add [dir]",
+    "  roundsman init [dir]",
+    "  roundsman list [path]",
+    "  roundsman [path] --dry-run",
+    "  roundsman [path] --json",
     "  roundsman --help",
     "  roundsman -h",
     "",
     `Scans path (default: your home directory) for directories containing one of: ${ROUNDSMAN_FILES.join(", ")}.`,
     `Global config path: ${globalPath}`,
+    "",
+    "Top-level commands:",
+    "  add [dir]   create roundsman.json with default config",
+    "  init [dir]  interactive add (prompt + todos)",
+    "  list [path] scan and print discovered projects without entering REPL",
+    "",
+    "Flags:",
+    "  --dry-run   scan and print projects, then exit",
+    "  --json      emit scan output as JSON (works with list and dry-run)",
+    "  --no-color  disable colored output",
     "",
     "REPL commands:",
     "  /work       start an agent turn for the current project",
@@ -887,9 +1094,10 @@ function showHelp() {
     "  /clear      alias for /fresh",
     "  /revert     revert last roundsman turn commit",
     "  /status     show project states",
+    "  /help       show REPL command list",
     "  /quit       stop agents and exit",
     "",
-    "Aliases: s=>drop, w/f/v/l/r/q and bare status still work.",
+    "Aliases: s=>drop, w/f/v/l/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
 }
@@ -897,38 +1105,58 @@ function showHelp() {
 // ── Main Loop ──────────────────────────────────────────────
 
 async function main() {
-  const args = process.argv.slice(2);
-  if (args.includes("--help") || args.includes("-h")) {
+  const cli = parseCliArgs(process.argv.slice(2));
+  setOutputColor(process.stdout.isTTY && !process.env.NO_COLOR && !cli.noColor);
+  if (cli.help) {
     showHelp();
+    process.exit(0);
+  }
+
+  if (cli.command === "add") {
+    const out = createProjectConfig(cli.pathArg || process.cwd());
+    if (!out.ok) {
+      console.error(`Error: ${out.error}`);
+      process.exit(1);
+    }
+    console.log(`Created ${out.configPath}`);
+    process.exit(0);
+  }
+
+  if (cli.command === "init") {
+    const rl = createRl();
+    const prompt = (await ask(rl, "  project prompt (optional) > ")).trim();
+    const todosRaw = (await ask(rl, "  initial todos (comma-separated, optional) > ")).trim();
+    rl.close();
+    const out = createProjectConfig(cli.pathArg || process.cwd(), { prompt, todos: parseTodoInput(todosRaw) });
+    if (!out.ok) {
+      console.error(`Error: ${out.error}`);
+      process.exit(1);
+    }
+    console.log(`Created ${out.configPath}`);
     process.exit(0);
   }
 
   const global = loadGlobalConfig();
   const globalConfig = global.config;
+  const roots = resolveScanRoots(cli.pathArg, globalConfig);
+  const dirs = scanProjectDirs(roots, globalConfig);
+  const scanOnly = cli.command === "list" || cli.dryRun || cli.json;
 
-  const rootArg = args[0];
-  const roots = rootArg
-    ? [path.resolve(rootArg)]
-    : (globalConfig.scanRoots.length ? globalConfig.scanRoots : [os.homedir()]);
-  const ignore = new Set(globalConfig.ignoreDirs);
-
-  const dirSet = new Set();
-  for (const root of roots) {
-    console.log(`Scanning ${root} for ${ROUNDSMAN_FILES.join(" | ")}...\n`);
-    const found = findGremlinDirs(root, globalConfig.maxDepth, ignore);
-    for (const dir of found) dirSet.add(dir);
+  if (scanOnly) {
+    displayScanOutput(roots, dirs, cli.json);
+    if (cli.dryRun && !cli.json) rmLog("Dry run complete.");
+    process.exit(0);
   }
-  const dirs = Array.from(dirSet);
-  if (!dirs.length) { console.log("No projects found."); process.exit(0); }
 
-  console.log(`Found ${dirs.length} project(s):\n`);
+  displayScanOutput(roots, dirs, false);
+  if (!dirs.length) process.exit(0);
+
   const projects = [];
   for (const dir of dirs) {
-    console.log(`  → ${dir}`);
     const p = setupProject(dir, globalConfig);
     if (p) projects.push(p);
   }
-  if (!projects.length) { console.log("\nAll projects locked or invalid."); process.exit(0); }
+  if (!projects.length) { rmLog("All projects locked or invalid."); process.exit(0); }
 
   // REPL
   const rl = createRl();
@@ -951,27 +1179,27 @@ async function main() {
     project.proc = null;
 
     if (opts.stopped) {
-      console.log(`\n  [stopped] ${formatProjectLabel(project)}`);
-      console.log(`         [${project.name}] ${result}`);
+      rmLog(`[stopped] ${formatProjectLabel(project)}`);
+      agentLog(project, result);
     } else {
-      console.log(`\n  [done] ${formatProjectLabel(project)} ($${cost.toFixed(4)})`);
+      rmLog(`[done] ${formatProjectLabel(project)} ($${cost.toFixed(4)})`);
       const preview = result.slice(0, globalConfig.ui.previewChars).replace(/\n/g, " ");
-      console.log(`         [${project.name}] ${preview}`);
+      agentLog(project, preview || "(empty result)");
     }
 
     if (!opts.stopped && project.loop) {
       project.loop.done += 1;
       if (result.startsWith("error:")) {
         const err = result.slice(0, 120).replace(/\n/g, " ");
-        console.log(`  [loop stop] ${project.name} at ${project.loop.done}/${project.loop.max}: ${err}`);
+        rmLog(`[loop stop] ${project.name} at ${project.loop.done}/${project.loop.max}: ${err}`);
         project.loop = null;
       } else if (project.loop.done < project.loop.max) {
         const n = project.loop.done + 1;
-        console.log(`  [loop] ${project.name} ${n}/${project.loop.max}`);
+        rmLog(`[loop] ${project.name} ${n}/${project.loop.max}`);
         spawnAgent(project, project.loop.goal, onAgentDone, runtime.model);
         return;
       } else {
-        console.log(`  [loop done] ${project.name} ${project.loop.done}/${project.loop.max}`);
+        rmLog(`[loop done] ${project.name} ${project.loop.done}/${project.loop.max}`);
         project.loop = null;
       }
     }
@@ -994,10 +1222,11 @@ async function main() {
   process.on("SIGINT", () => { cleanup(); process.exit(0); });
   process.on("SIGTERM", () => { cleanup(); process.exit(0); });
 
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("  🔁 ROUNDSMAN REPL");
-  console.log("  /work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /quit /status");
-  console.log(`${"═".repeat(60)}\n`);
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("  🔁 ROUNDSMAN REPL");
+  displayReplHelp();
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("");
 
   while (true) {
     refreshSnoozed(projects, queue);
@@ -1008,13 +1237,14 @@ async function main() {
     const snoozed = projects.filter((p) => p.state === "snoozed");
 
     if (!idle.length && !working.length && !snoozed.length) {
-      console.log("\nAll projects dropped or done. Exiting.");
+      rmLog("All projects dropped or done. Exiting.");
       break;
     }
 
     if (!idle.length) {
       displayStatus(projects);
-      console.log("  No active idle projects. Waiting...\n");
+      rmLog("  No active idle projects. Waiting...");
+      rmLog("");
       await new Promise((resolve) => {
         let done = false;
         let to = null;
@@ -1039,8 +1269,9 @@ async function main() {
 
     displayProject(project);
 
-    const actionRaw = parseAction(await ask(rl, "  command (/work, /loop, /stop, /kill, /quit) > "));
+    const actionRaw = parseAction(await ask(rl, "  command (/work, /loop, /stop, /kill, /help, /quit) > "));
     const { cmd, arg } = parseCommand(actionRaw);
+    userLog(`/${actionRaw}`);
     const r = await runCommand({
       cmd,
       arg,
@@ -1058,12 +1289,13 @@ async function main() {
       break;
     }
     if (r === "handled") continue;
-    console.log("  → unknown command, try /work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /quit /status");
+    rmLog("  → unknown command, try /help");
   }
 
   rl.close();
-  console.log(`\n  Total cost: $${totalCost.toFixed(4)}`);
-  console.log(`${"═".repeat(60)}\n`);
+  rmLog(`Total cost: $${totalCost.toFixed(4)}`);
+  rmLog(`${"═".repeat(60)}`);
+  rmLog("");
 }
 
 if (require.main === module) {
@@ -1072,14 +1304,18 @@ if (require.main === module) {
 
 module.exports = {
   buildPrompt,
+  buildProjectConfig,
+  createProjectConfig,
   dropProject,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
   normalizeSession,
   parseAction,
+  parseCliArgs,
   parseDurationMs,
   parseLoopCommand,
+  parseTodoInput,
   refreshSnoozed,
   snoozeProject,
   stopLoop,
