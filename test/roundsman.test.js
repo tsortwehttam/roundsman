@@ -8,9 +8,11 @@ const {
   buildPrompt,
   buildProjectConfig,
   collectDuplicateRepoBranches,
+  consumeStreamChunk,
   createProjectConfig,
   dropProject,
   formatRepoTag,
+  isInputWaitEvent,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
@@ -23,6 +25,8 @@ const {
   refreshSnoozed,
   snoozeProject,
   stopLoop,
+  toProgressLine,
+  applyStreamEvent,
 } = require("../roundsman.js");
 
 test("normalizeSession defaults and trims history", () => {
@@ -209,6 +213,40 @@ test("collectDuplicateRepoBranches groups matching repo+branch", () => {
   assert.equal(groups[0].repoName, "a");
   assert.equal(groups[0].branch, "main");
   assert.deepEqual(groups[0].projects.map((p) => p.dir), ["/r/a/w1", "/r/a/w2"]);
+});
+
+test("toProgressLine renders tool steps and outputs", () => {
+  assert.equal(
+    toProgressLine({ type: "tool_use", name: "bash", input: { cmd: "ls -la" } }),
+    '[step] bash {"cmd":"ls -la"}',
+  );
+  assert.equal(
+    toProgressLine({ type: "tool_result", content: [{ text: "ok" }] }),
+    "[output] ok",
+  );
+});
+
+test("consumeStreamChunk parses newline-delimited chunks", () => {
+  const s = { lineBuf: "" };
+  const lines = [];
+  consumeStreamChunk("{\"a\":1}\n{\"b\":", s, (line) => lines.push(line));
+  consumeStreamChunk("2}\n", s, (line) => lines.push(line));
+  assert.deepEqual(lines, ['{"a":1}', '{"b":2}']);
+});
+
+test("applyStreamEvent updates result and usage fields", () => {
+  const s = { result: "", cost: 0, turns: 0, sessionId: "" };
+  applyStreamEvent(s, { result: "done", total_cost_usd: 0.12, num_turns: 2, session_id: "abc" });
+  assert.equal(s.result, "done");
+  assert.equal(s.cost, 0.12);
+  assert.equal(s.turns, 2);
+  assert.equal(s.sessionId, "abc");
+});
+
+test("isInputWaitEvent matches wait events and messages", () => {
+  assert.equal(isInputWaitEvent({ type: "user_input_required" }), true);
+  assert.equal(isInputWaitEvent({ type: "system", message: "Waiting for user input to continue" }), true);
+  assert.equal(isInputWaitEvent({ type: "assistant", message: "continuing work" }), false);
 });
 
 test("createProjectConfig fails when marker already exists", () => {

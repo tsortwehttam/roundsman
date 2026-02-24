@@ -200,7 +200,7 @@ Each agent turn:
 
 1. Optionally checkpoints dirty state if git checkpoints are enabled
 2. Builds a prompt from your project marker file context + your input
-3. Runs `claude -p --output-format json --permission-mode acceptEdits`
+3. Runs `claude -p --output-format stream-json --permission-mode acceptEdits`
 4. On first turn, sets a session ID; on subsequent turns, resumes the conversation
 5. Parses the result, updates project state, and optionally checkpoints again
 

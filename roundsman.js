@@ -38,6 +38,7 @@ const ANSI = {
   cyan: "\x1b[36m",
 };
 const PROJECT_COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m"];
+const STREAM_PREVIEW_CHARS = 240;
 const OUTPUT = {
   color: true,
 };
@@ -132,6 +133,130 @@ function userLog(msg = "") {
 function agentLog(project, msg = "") {
   const prefix = `${getProjectPrefix(project)} `;
   for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
+}
+
+function previewText(v, max = STREAM_PREVIEW_CHARS) {
+  const s = String(v || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 3)}...`;
+}
+
+function extractText(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.map((x) => extractText(x)).filter((x) => x).join(" ");
+  if (typeof v !== "object") return String(v);
+
+  if (typeof v.text === "string" && v.text) return v.text;
+  if (typeof v.output === "string" && v.output) return v.output;
+  if (typeof v.result === "string" && v.result) return v.result;
+  if (typeof v.message === "string" && v.message) return v.message;
+  if (v.delta) return extractText(v.delta);
+  if (v.content) return extractText(v.content);
+  return "";
+}
+
+function toProgressLine(evt) {
+  if (!evt || typeof evt !== "object") return "";
+
+  if (evt.type === "content_block_start" && evt.content_block && evt.content_block.type === "tool_use") {
+    const name = String(evt.content_block.name || "tool");
+    const input = previewText(stringifyMeta(evt.content_block.input || ""));
+    return `[step] ${name}${input ? ` ${input}` : ""}`;
+  }
+
+  if (evt.type === "tool_use") {
+    const name = String(evt.name || "tool");
+    const input = previewText(stringifyMeta(evt.input || ""));
+    return `[step] ${name}${input ? ` ${input}` : ""}`;
+  }
+
+  if (evt.type === "tool_result") {
+    const out = previewText(extractText(evt));
+    if (!out) return "[output]";
+    return `[output] ${out}`;
+  }
+
+  if (evt.type === "assistant" || (evt.type === "message" && evt.role === "assistant")) {
+    const out = previewText(extractText(evt));
+    if (!out) return "";
+    return `[agent] ${out}`;
+  }
+
+  if (evt.type === "error") {
+    const out = previewText(extractText(evt) || stringifyMeta(evt.error || ""));
+    return `[error] ${out || "agent error"}`;
+  }
+
+  if (evt.type === "system") {
+    const out = previewText(extractText(evt));
+    if (!out) return "";
+    return `[system] ${out}`;
+  }
+
+  return "";
+}
+
+function isInputWaitEvent(evt) {
+  if (!evt || typeof evt !== "object") return false;
+  const t = typeof evt.type === "string" ? evt.type.toLowerCase() : "";
+  if (t.includes("input") && (t.includes("wait") || t.includes("request") || t.includes("required"))) return true;
+  const txt = extractText(evt).toLowerCase();
+  if (!txt) return false;
+  return txt.includes("waiting for user input") || txt.includes("awaiting user input") || txt.includes("user input required");
+}
+
+function pushBufferedProgress(project, msg) {
+  if (!msg) return;
+  if (!Array.isArray(project.pendingStream)) project.pendingStream = [];
+  project.pendingStream.push(msg);
+  if (project.pendingStream.length > 200) project.pendingStream = project.pendingStream.slice(-200);
+}
+
+function emitProgress(project, msg) {
+  if (!msg) return;
+  if (project.holdStream === true) {
+    pushBufferedProgress(project, msg);
+    return;
+  }
+  agentLog(project, msg);
+}
+
+function flushBufferedProgress(project) {
+  const list = Array.isArray(project.pendingStream) ? project.pendingStream : [];
+  if (!list.length) return;
+  agentLog(project, `[buffered] ${list.length} message(s) while waiting for user input`);
+  for (const msg of list) agentLog(project, msg);
+  project.pendingStream = [];
+}
+
+function applyStreamEvent(state, evt) {
+  if (!evt || typeof evt !== "object") return state;
+  const next = state;
+  if (typeof evt.result === "string") next.result = evt.result;
+  if (typeof evt.total_cost_usd === "number") next.cost = evt.total_cost_usd;
+  if (typeof evt.num_turns === "number") next.turns = evt.num_turns;
+  if (typeof evt.session_id === "string" && evt.session_id) next.sessionId = evt.session_id;
+  return next;
+}
+
+function consumeStreamChunk(chunk, state, onLine) {
+  let buf = state.lineBuf + String(chunk || "");
+  let i = buf.indexOf("\n");
+  while (i >= 0) {
+    const line = buf.slice(0, i).trim();
+    if (line) onLine(line);
+    buf = buf.slice(i + 1);
+    i = buf.indexOf("\n");
+  }
+  state.lineBuf = buf;
+}
+
+function consumeStreamTail(state, onLine) {
+  const line = String(state.lineBuf || "").trim();
+  if (line) onLine(line);
+  state.lineBuf = "";
 }
 
 function resolveGlobalConfigPath() {
@@ -394,6 +519,8 @@ function setupProject(dir, globalConfig) {
     stopReason: "",
     loop: null,
     snoozeUntil: 0,
+    holdStream: false,
+    pendingStream: [],
   };
 }
 
@@ -495,23 +622,16 @@ function revertLastTurn(project) {
 function displayProject(project) {
   const { config, dir } = project;
   const tag = formatRepoTag(project);
-  rmLog("");
-  rmLog(`${"─".repeat(60)}`);
-  rmLog(`  ${tag}  (${dir})`);
-  rmLog(`${"─".repeat(60)}`);
-
-  if (config.prompt) rmLog(`  context: ${config.prompt}`);
-
-  if (config.todos.length) rmLog(`  todos:   ${config.todos.join(" | ")}`);
-  if (config.doing.length) rmLog(`  doing:   ${config.doing.join(" | ")}`);
-  if (config.done.length) rmLog(`  done:    ${config.done.join(" | ")}`);
-
-  if (config.session.summary) rmLog(`  summary: ${config.session.summary}`);
-  rmLog(`  turn:    ${config.session.turn}`);
+  rmLog(`project: ${tag} (${dir})`);
+  if (config.prompt) rmLog(`context: ${config.prompt}`);
+  if (config.todos.length) rmLog(`todos: ${config.todos.join(" | ")}`);
+  if (config.doing.length) rmLog(`doing: ${config.doing.join(" | ")}`);
+  if (config.done.length) rmLog(`done: ${config.done.join(" | ")}`);
+  if (config.session.summary) rmLog(`summary: ${config.session.summary}`);
+  rmLog(`turn: ${config.session.turn}`);
 
   const meta = Object.entries(config).filter(([k]) => !KNOWN_KEYS.has(k));
-  for (const [k, v] of meta) rmLog(`  ${k}: ${stringifyMeta(v)}`);
-  rmLog("");
+  for (const [k, v] of meta) rmLog(`${k}: ${stringifyMeta(v)}`);
 }
 
 function formatProjectLabel(project) {
@@ -522,46 +642,36 @@ function formatProjectLabel(project) {
 
 function displayLastResult(project) {
   const hist = project.config.session.history;
-  if (!hist.length) { rmLog("  (no turns yet)"); return; }
+  if (!hist.length) { rmLog("(no turns yet)"); return; }
   const last = hist[hist.length - 1];
-  rmLog("");
-  rmLog(`  Project: ${formatProjectLabel(project)}`);
-  rmLog(`  Turn ${project.config.session.turn} (${last.at})`);
-  rmLog(`  Input: ${last.input || "(none)"}`);
-  rmLog(`  Cost: $${last.cost.toFixed(4)} | Agent turns: ${last.turns}`);
-  rmLog(`${"─".repeat(60)}`);
+  rmLog(`result: ${formatProjectLabel(project)}`);
+  rmLog(`turn ${project.config.session.turn} at ${last.at}`);
+  rmLog(`input: ${last.input || "(none)"}`);
+  rmLog(`cost: $${last.cost.toFixed(4)} | agent turns: ${last.turns}`);
   agentLog(project, last.result || "(empty result)");
-  rmLog(`${"─".repeat(60)}`);
-  rmLog("");
 }
 
 function displayLog(project) {
   const hist = project.config.session.history;
-  if (!hist.length) { rmLog("  (no turns yet)"); return; }
-  rmLog("");
-  rmLog(`  Project: ${formatProjectLabel(project)}`);
+  if (!hist.length) { rmLog("(no turns yet)"); return; }
+  rmLog(`log: ${formatProjectLabel(project)}`);
   for (let i = 0; i < hist.length; i++) {
     const h = hist[i];
     const preview = (h.result || "").slice(0, 80).replace(/\n/g, " ");
-    rmLog(`  ${i + 1}. ${h.at}  $${h.cost.toFixed(4)}  ${h.turns}t`);
-    rmLog(`     in:  ${h.input || "(none)"}`);
+    rmLog(`${i + 1}. ${h.at}  $${h.cost.toFixed(4)}  ${h.turns}t`);
+    rmLog(`in: ${h.input || "(none)"}`);
     agentLog(project, preview || "(empty result)");
   }
-  rmLog("");
 }
 
 function displayStatus(projects) {
-  rmLog("");
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("  STATUS");
-  rmLog(`${"═".repeat(60)}`);
+  rmLog("status:");
   for (const p of projects) {
     const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : "✗";
     const loop = p.loop ? ` loop ${p.loop.done}/${p.loop.max}` : "";
     const snooze = p.state === "snoozed" ? ` ${formatMsShort(p.snoozeUntil - Date.now())}` : "";
-    rmLog(`  ${icon} ${formatRepoTag(p).padEnd(30)} ${p.state}${snooze}${loop}`);
+    rmLog(`${icon} ${formatRepoTag(p).padEnd(30)} ${p.state}${snooze}${loop}`);
   }
-  rmLog("");
 }
 
 // ── Background Agent ───────────────────────────────────────
@@ -576,7 +686,7 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
 
   const prompt = buildPrompt(config, userInput);
   const isResume = config.session.turn > 0;
-  const args = ["-p", "--output-format", "json", "--permission-mode", cfg.defaultPermissionMode];
+  const args = ["-p", "--output-format", "stream-json", "--permission-mode", cfg.defaultPermissionMode];
   const model = modelOverride || cfg.defaultModel;
   if (model) args.push("--model", model);
 
@@ -597,9 +707,42 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
   const proc = spawn(cfg.claudeBin, args, { cwd: dir, env, stdio: "pipe" });
   let stdout = "";
   let stderr = "";
+  const stream = { lineBuf: "", result: "", cost: 0, turns: 0, sessionId: "", streamSeen: false };
+  const stderrState = { lineBuf: "" };
+  project.holdStream = false;
 
-  proc.stdout.on("data", (b) => { stdout += String(b); });
-  proc.stderr.on("data", (b) => { stderr += String(b); });
+  proc.stdout.on("data", (b) => {
+    const chunk = String(b);
+    stdout += chunk;
+    consumeStreamChunk(chunk, stream, (line) => {
+      let evt = null;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        return;
+      }
+      stream.streamSeen = true;
+      applyStreamEvent(stream, evt);
+      if (isInputWaitEvent(evt)) {
+        project.holdStream = true;
+        emitProgress(project, "[wait] agent is waiting for user input; streaming paused");
+        return;
+      }
+      const msg = toProgressLine(evt);
+      emitProgress(project, msg);
+    });
+  });
+
+  proc.stderr.on("data", (b) => {
+    const chunk = String(b);
+    stderr += chunk;
+    consumeStreamChunk(chunk, stderrState, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      if (line.toLowerCase().includes("waiting for user input")) project.holdStream = true;
+      emitProgress(project, `[stderr] ${msg}`);
+    });
+  });
 
   proc.on("close", (code, signal) => {
     if (project.stopReason) {
@@ -616,17 +759,47 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
     let cost = 0;
     let turns = 0;
 
-    if (code === 0 && stdout.trim()) {
+    consumeStreamTail(stream, (line) => {
+      let evt = null;
       try {
-        const json = JSON.parse(stdout.trim());
-        result = json.result || "";
-        cost = json.total_cost_usd || 0;
-        turns = json.num_turns || 0;
-
-        // update session_id if CLI assigned a different one
-        if (json.session_id) config.session.sessionId = json.session_id;
+        evt = JSON.parse(line);
       } catch {
-        result = stdout.trim().slice(0, 2000);
+        return;
+      }
+      stream.streamSeen = true;
+      applyStreamEvent(stream, evt);
+      if (isInputWaitEvent(evt)) {
+        project.holdStream = true;
+        emitProgress(project, "[wait] agent is waiting for user input; streaming paused");
+        return;
+      }
+      const msg = toProgressLine(evt);
+      emitProgress(project, msg);
+    });
+    consumeStreamTail(stderrState, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      emitProgress(project, `[stderr] ${msg}`);
+    });
+
+    if (code === 0 && stdout.trim()) {
+      if (stream.streamSeen) {
+        result = stream.result || "";
+        cost = stream.cost || 0;
+        turns = stream.turns || 0;
+        if (stream.sessionId) config.session.sessionId = stream.sessionId;
+      }
+
+      if (!result) {
+        try {
+          const json = JSON.parse(stdout.trim());
+          result = json.result || "";
+          if (!cost) cost = json.total_cost_usd || 0;
+          if (!turns) turns = json.num_turns || 0;
+          if (json.session_id) config.session.sessionId = json.session_id;
+        } catch {
+          result = stdout.trim().slice(0, 2000);
+        }
       }
     } else {
       result = `error: exit ${code} — ${stderr.trim().slice(0, 500)}`;
@@ -789,48 +962,38 @@ function getProjectUsage(project) {
 }
 
 function displayUsage(projects, totalCost) {
-  rmLog("");
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("  USAGE");
-  rmLog(`${"═".repeat(60)}`);
-  rmLog(`  total: $${totalCost.toFixed(4)}`);
+  rmLog(`usage: total $${totalCost.toFixed(4)}`);
   for (const p of projects) {
     const cost = getProjectUsage(p);
     const turns = p.config.session.history.length;
-    rmLog(`  ${p.name.padEnd(30)} $${cost.toFixed(4)}  ${turns} turns`);
+    rmLog(`${p.name.padEnd(30)} $${cost.toFixed(4)}  ${turns} turns`);
   }
-  rmLog("");
 }
 
 function displayStartupConfig(globalConfig, roots, projects) {
   const active = projects.filter((p) => p.gitEnabled).length;
   const total = projects.length;
-  rmLog("");
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("  CONFIG");
-  rmLog(`${"═".repeat(60)}`);
-  rmLog(`  roots: ${roots.join(" | ")}`);
-  rmLog(`  maxDepth: ${globalConfig.maxDepth} | maxHistory: ${globalConfig.maxHistory}`);
-  rmLog(`  model: ${globalConfig.defaultModel || "(cli default)"}`);
-  rmLog(`  permission: ${globalConfig.defaultPermissionMode}`);
-  rmLog(`  checkpoints: ${globalConfig.checkpoint.enabled ? "on" : "off"} (git: ${active}/${total} projects)`);
-  rmLog(`  autoInitGit: ${globalConfig.checkpoint.autoInitGit ? "on" : "off"}`);
-  rmLog("  round-robin:");
-  for (const p of projects) rmLog(`    - ${formatRepoTag(p)} (${p.dir})`);
-  rmLog("");
+  rmLog("config:");
+  rmLog(`roots: ${roots.join(" | ")}`);
+  rmLog(`maxDepth: ${globalConfig.maxDepth} | maxHistory: ${globalConfig.maxHistory}`);
+  rmLog(`model: ${globalConfig.defaultModel || "(cli default)"}`);
+  rmLog(`permission: ${globalConfig.defaultPermissionMode}`);
+  rmLog(`checkpoints: ${globalConfig.checkpoint.enabled ? "on" : "off"} (git: ${active}/${total})`);
+  rmLog(`autoInitGit: ${globalConfig.checkpoint.autoInitGit ? "on" : "off"}`);
+  rmLog("round-robin:");
+  for (const p of projects) rmLog(`- ${formatRepoTag(p)} (${p.dir})`);
 }
 
 function displayLoops(projects) {
   const active = projects.filter((p) => p.loop);
   if (!active.length) {
-    rmLog("  (no active loops)");
+    rmLog("(no active loops)");
     return;
   }
-  rmLog("");
+  rmLog("loops:");
   for (const p of active) {
-    rmLog(`  ${formatRepoTag(p)}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
+    rmLog(`${formatRepoTag(p)}: ${p.loop.done}/${p.loop.max} "${p.loop.goal}"`);
   }
-  rmLog("");
 }
 
 function findProjectBySelector(projects, selector) {
@@ -907,10 +1070,9 @@ function showNoProjectsFound(roots) {
   rmLog("No projects found.");
   if (!roots.length) return;
   const ex = roots[0];
-  rmLog("");
   rmLog("Try:");
-  rmLog(`  roundsman add ${path.join(ex, "my-project")}`);
-  rmLog(`  roundsman ${ex}`);
+  rmLog(`roundsman add ${path.join(ex, "my-project")}`);
+  rmLog(`roundsman ${ex}`);
 }
 
 function resolveScanRoots(pathArg, globalConfig) {
@@ -960,14 +1122,12 @@ function collectDuplicateRepoBranches(projects) {
 function displayDuplicateRepoBranchWarnings(projects) {
   const groups = collectDuplicateRepoBranches(projects);
   if (!groups.length) return;
-  rmLog("");
   rmLog("warning: multiple projects share the same repo+branch:");
   for (const g of groups) {
-    rmLog(`  ${g.repoName}@${g.branch}`);
-    for (const p of g.projects) rmLog(`    - ${p.dir}`);
+    rmLog(`${g.repoName}@${g.branch}`);
+    for (const p of g.projects) rmLog(`- ${p.dir}`);
   }
   rmLog("consider separate branches/worktrees to avoid overlap.");
-  rmLog("");
 }
 
 function displayScanOutput(roots, dirs, asJson) {
@@ -977,41 +1137,39 @@ function displayScanOutput(roots, dirs, asJson) {
     return;
   }
   for (const root of roots) rmLog(`Scanning ${root} for ${ROUNDSMAN_FILES.join(" | ")}...`);
-  rmLog("");
   if (!dirs.length) {
     showNoProjectsFound(roots);
     return;
   }
   rmLog(`Found ${dirs.length} project(s):`);
-  rmLog("");
-  for (const row of out.projects) rmLog(`  → ${row.dir}`);
+  for (const row of out.projects) rmLog(`- ${row.dir}`);
 }
 
 function displayReplHelp() {
-  rmLog("  /work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
+  rmLog("/work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
 }
 
 function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel) {
   const { project, projects, queue } = ctx;
   if (!sel || sel === "current" || sel === "this") {
-    if (!apply(project, queue)) rmLog(`  → ${missingLabel} ${project.name}`);
+    if (!apply(project, queue)) rmLog(`-> ${missingLabel} ${project.name}`);
     return "handled";
   }
   if (sel === "all") {
     const count = projects.filter((p) => apply(p, queue)).length;
-    if (!count) rmLog(`  → ${missingAllLabel}`);
+    if (!count) rmLog(`-> ${missingAllLabel}`);
     return "handled";
   }
   const found = findProjectBySelector(projects, sel);
   if (found.kind === "none") {
-    rmLog(`  → no project matched "${sel}"`);
+    rmLog(`-> no project matched "${sel}"`);
     return "handled";
   }
   if (found.kind === "many") {
-    rmLog(`  → ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
+    rmLog(`-> ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
     return "handled";
   }
-  if (!apply(found.matches[0], queue)) rmLog(`  → ${missingLabel} ${found.matches[0].name}`);
+  if (!apply(found.matches[0], queue)) rmLog(`-> ${missingLabel} ${found.matches[0].name}`);
   return "handled";
 }
 
@@ -1023,13 +1181,13 @@ const REPL_COMMANDS = {
   help: async function help() { displayReplHelp(); return "handled"; },
   model: async function model(ctx) {
     const next = ctx.arg.trim();
-    if (!next) rmLog(`  → model: ${ctx.runtime.model || "(default cli model)"}`);
+    if (!next) rmLog(`-> model: ${ctx.runtime.model || "(default cli model)"}`);
     else if (next.toLowerCase() === "none") {
       ctx.runtime.model = "";
-      rmLog("  → cleared runtime model override");
+      rmLog("-> cleared runtime model override");
     } else {
       ctx.runtime.model = next;
-      rmLog(`  → runtime model set to ${ctx.runtime.model}`);
+      rmLog(`-> runtime model set to ${ctx.runtime.model}`);
     }
     return "handled";
   },
@@ -1055,54 +1213,58 @@ const REPL_COMMANDS = {
   },
   drop: async function drop(ctx) {
     dropProject(ctx.project, ctx.queue);
-    rmLog(`  → dropped ${ctx.project.name}`);
+    rmLog(`-> dropped ${ctx.project.name}`);
     return "handled";
   },
   snooze: async function snooze(ctx) {
     const ms = parseDurationMs(ctx.arg);
     if (!ms) {
-      rmLog("  → usage: /snooze <n>[s|m|h|d]  (default unit: minutes)");
+      rmLog("-> usage: /snooze <n>[s|m|h|d] (default unit: minutes)");
       return "handled";
     }
     snoozeProject(ctx.project, ctx.queue, ms);
-    rmLog(`  → snoozed ${ctx.project.name} for ${formatMsShort(ms)}`);
+    rmLog(`-> snoozed ${ctx.project.name} for ${formatMsShort(ms)}`);
     return "handled";
   },
   fresh: async function fresh(ctx) {
     stopLoop(ctx.project, ctx.queue, "session reset");
     resetSession(ctx.project);
-    rmLog(`  → reset session for ${ctx.project.name} (new sessionId, history cleared)`);
+    rmLog(`-> reset session for ${ctx.project.name} (new sessionId, history cleared)`);
     return "handled";
   },
   view: async function view(ctx) { displayLastResult(ctx.project); return "handled"; },
   log: async function log(ctx) { displayLog(ctx.project); return "handled"; },
   revert: async function revert(ctx) {
     const err = revertLastTurn(ctx.project);
-    if (err) rmLog(`  → revert failed: ${err}`);
-    else rmLog(`  → reverted last turn for ${ctx.project.name}`);
+    if (err) rmLog(`-> revert failed: ${err}`);
+    else rmLog(`-> reverted last turn for ${ctx.project.name}`);
     return "handled";
   },
   loop: async function loop(ctx) {
     const loop = parseLoopCommand(ctx.actionRaw);
     if (!loop) {
-      rmLog("  → usage: /loop <n> <goal>");
+      rmLog("-> usage: /loop <n> <goal>");
       return "handled";
     }
     ctx.project.loop = { max: loop.max, goal: loop.goal, done: 0 };
-    rmLog(`  → starting loop ${ctx.project.name}: 1/${loop.max} "${loop.goal}"`);
+    flushBufferedProgress(ctx.project);
+    ctx.project.holdStream = false;
+    rmLog(`-> starting loop ${ctx.project.name}: 1/${loop.max} "${loop.goal}"`);
     spawnAgent(ctx.project, loop.goal, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
     if (i >= 0) ctx.queue.splice(i, 1);
     return "handled";
   },
   work: async function work(ctx) {
-    const input = (await ask(ctx.rl, "  what to work on > ")).trim();
+    const input = (await ask(ctx.rl, "what to work on > ")).trim();
     if (!input) {
-      rmLog("  → no input, skipping");
+      rmLog("-> no input, skipping");
       return "handled";
     }
+    flushBufferedProgress(ctx.project);
+    ctx.project.holdStream = false;
     userLog(input);
-    rmLog(`  → starting agent for ${ctx.project.name}...`);
+    rmLog(`-> starting agent for ${ctx.project.name}...`);
     spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
     if (i >= 0) ctx.queue.splice(i, 1);
@@ -1120,50 +1282,20 @@ async function runCommand(ctx) {
 function showHelp() {
   const globalPath = resolveGlobalConfigPath();
   const lines = [
-    "roundsman 🔁",
-    "",
-    "Usage:",
-    "  roundsman [path]",
-    "  roundsman add [dir]",
-    "  roundsman init [dir]",
-    "  roundsman list [path]",
-    "  roundsman [path] --dry-run",
-    "  roundsman [path] --json",
-    "  roundsman --help",
-    "  roundsman -h",
-    "",
+    "roundsman",
+    "usage:",
+    "roundsman [path]",
+    "roundsman add [dir]",
+    "roundsman init [dir]",
+    "roundsman list [path]",
+    "roundsman [path] --dry-run",
+    "roundsman [path] --json",
+    "roundsman --help | -h",
     `Scans path (default: your home directory) for directories containing one of: ${ROUNDSMAN_FILES.join(", ")}.`,
     `Global config path: ${globalPath}`,
-    "",
-    "Top-level commands:",
-    "  add [dir]   create roundsman.json with default config",
-    "  init [dir]  interactive add (prompt + todos)",
-    "  list [path] scan and print discovered projects without entering REPL",
-    "",
-    "Flags:",
-    "  --dry-run   scan and print projects, then exit",
-    "  --json      emit scan output as JSON (works with list and dry-run)",
-    "  --no-color  disable colored output",
-    "",
-    "REPL commands:",
-    "  /work       start an agent turn for the current project",
-    "  /drop       remove current project for this run",
-    "  /snooze N   pause project; default unit is minutes (s/m/h/d)",
-    "  /fresh      reset current project's session",
-    "  /view       show last turn output",
-    "  /log        show turn history",
-    "  /loop N X   run instruction X for up to N iterations",
-    "  /stop [id]  stop active loop for current project, project id, or all",
-    "  /kill [id]  kill running agent for current project, project id, or all",
-    "  /loops      list active loops",
-    "  /usage      show total and per-project session cost",
-    "  /model [m]  show/set runtime model (use 'none' to clear)",
-    "  /clear      alias for /fresh",
-    "  /revert     revert last roundsman turn commit",
-    "  /status     show project states",
-    "  /help       show REPL command list",
-    "  /quit       stop agents and exit",
-    "",
+    "commands: add/init/list",
+    "flags: --dry-run --json --no-color",
+    "repl: /work /drop /snooze /fresh /view /log /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
     "Aliases: s=>drop, w/f/v/l/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
@@ -1191,8 +1323,8 @@ async function main() {
 
   if (cli.command === "init") {
     const rl = createRl();
-    const prompt = (await ask(rl, "  project prompt (optional) > ")).trim();
-    const todosRaw = (await ask(rl, "  initial todos (comma-separated, optional) > ")).trim();
+    const prompt = (await ask(rl, "project prompt (optional) > ")).trim();
+    const todosRaw = (await ask(rl, "initial todos (comma-separated, optional) > ")).trim();
     rl.close();
     const out = createProjectConfig(cli.pathArg || process.cwd(), { prompt, todos: parseTodoInput(todosRaw) });
     if (!out.ok) {
@@ -1229,7 +1361,7 @@ async function main() {
   // REPL
   const rl = createRl();
   displayStartupConfig(globalConfig, roots, projects);
-  const ready = (await ask(rl, "  Press enter to start round-robin (or type q to quit) > ")).trim().toLowerCase();
+  const ready = (await ask(rl, "press enter to start (or q to quit) > ")).trim().toLowerCase();
   if (ready === "q" || ready === "quit") {
     rl.close();
     process.exit(0);
@@ -1290,11 +1422,8 @@ async function main() {
   process.on("SIGINT", () => { cleanup(); process.exit(0); });
   process.on("SIGTERM", () => { cleanup(); process.exit(0); });
 
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("  🔁 ROUNDSMAN REPL");
+  rmLog("repl:");
   displayReplHelp();
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("");
 
   while (true) {
     refreshSnoozed(projects, queue);
@@ -1311,8 +1440,7 @@ async function main() {
 
     if (!idle.length) {
       displayStatus(projects);
-      rmLog("  No active idle projects. Waiting...");
-      rmLog("");
+      rmLog("No active idle projects. Waiting...");
       await new Promise((resolve) => {
         let done = false;
         let to = null;
@@ -1337,7 +1465,7 @@ async function main() {
 
     displayProject(project);
 
-    const actionRaw = parseAction(await ask(rl, "  command (/work, /loop, /stop, /kill, /help, /quit) > "));
+    const actionRaw = parseAction(await ask(rl, "command (/work, /loop, /stop, /kill, /help, /quit) > "));
     const { cmd, arg } = parseCommand(actionRaw);
     userLog(`/${actionRaw}`);
     const r = await runCommand({
@@ -1357,13 +1485,11 @@ async function main() {
       break;
     }
     if (r === "handled") continue;
-    rmLog("  → unknown command, try /help");
+    rmLog("-> unknown command, try /help");
   }
 
   rl.close();
   rmLog(`Total cost: $${totalCost.toFixed(4)}`);
-  rmLog(`${"═".repeat(60)}`);
-  rmLog("");
 }
 
 if (require.main === module) {
@@ -1371,12 +1497,15 @@ if (require.main === module) {
 }
 
 module.exports = {
+  applyStreamEvent,
   buildPrompt,
   buildProjectConfig,
+  consumeStreamChunk,
   collectDuplicateRepoBranches,
   createProjectConfig,
   dropProject,
   formatRepoTag,
+  isInputWaitEvent,
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
@@ -1389,4 +1518,5 @@ module.exports = {
   refreshSnoozed,
   snoozeProject,
   stopLoop,
+  toProgressLine,
 };
