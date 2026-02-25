@@ -1,31 +1,21 @@
-# roundsman
+# Roundsman
 
-I built `roundsman` because I found multi-project agent work noisy and exhausting. Too many tabs, too many terminals, too much context-switching overhead.
+Roundsman is a Node.js-based CLI tool thatto make it easy to work on many projects with Claude at the same time. It is kept very, stupidly, simple on purpose. I do not like windows/panels/tabs, I do not like "TUI" theatrics, and I do not like tools that I have to remember more than 2 things to use. So, here's how you use it:
 
-I wanted one place where I could:
+1. Put a `roundsman.json` in any folder you work on with Claude Code. Blank is fine, whatever
+2. Run `roundsman` from anywhere on your machine (after installing it, sir)
 
-- queue up several projects,
-- hand work to agents in each project,
-- keep moving while they run,
-- and get pulled back through projects in a clean round-robin loop.
+After a quick confirmation prompt, Roundsman will start visiting all your projects in order, in round-robin fashion. Upon each visit, you (the "engineer") are expected to give a prompt. Roundsman will send that prompt to Claude, who will do the actual work. While Claude is working, Roundsman will take you to the next available project, and so-on. If all Claudes are working, you will wait until one of the projects needs you. You'll see Claude's output(s) in the meantime.
 
-That is what this tool is.
+There are a few advanced features available too - such as slash-commands, obviously. Like `/snooze 13` (to stop visiting a given project for 13 minutes), or `/drop` (to remove a project from the round robin list), or even `/loop 88 fix all the bugs` which will make it tell Claude to `"fix all the bugs"` 88 times. See below for more about commands and settings.
 
-## Why Round-Robin Agent Work
+Congratulations, you can now code on a bajillion projects with Claude at the same time in a straightforward manner.
 
-When you run one agent at a time, your focus often gets trapped in waiting.
-When you run many agents in ad-hoc tabs, you lose track of state.
+---
 
-Round-robin is a practical middle path:
+## AI-Generated README
 
-- Each project gets a turn.
-- Background agents keep progressing while you make decisions elsewhere.
-- You always return to a single prompt with explicit project context.
-- Session state is persisted per project, so the loop stays coherent over time.
-
-`roundsman` does not try to replace your editor or agent tooling. It is an orchestration layer for people who are already coding with agents and want a calmer control surface.
-
-## What It Does
+### What It Does
 
 - Scans for project markers: `roundsman.json`, `roundsman`, `.roundsman`
 - Builds a round-robin queue across discovered projects
@@ -37,7 +27,7 @@ Round-robin is a practical middle path:
 - Shows recent cross-project live activity via `/activity`
 - Optionally creates git checkpoints before/after turns
 
-## Requirements
+### Requirements
 
 - Node.js `>= 18`
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) available as `claude`
@@ -49,7 +39,7 @@ node -v
 claude --version
 ```
 
-## Install
+### Install
 
 From this repository:
 
@@ -70,7 +60,7 @@ For local development without global install:
 node roundsman.js --help
 ```
 
-## Quickstart
+### Quickstart
 
 Create or mark projects:
 
@@ -91,7 +81,7 @@ Or run with default scan roots (configured globally, or home directory if unset)
 roundsman
 ```
 
-## CLI Usage
+### CLI Usage
 
 ```bash
 roundsman [path]
@@ -111,7 +101,7 @@ Behavior:
 - `--json` emits machine-readable scan output
 - `--no-color` disables ANSI output (`NO_COLOR` is also respected)
 
-## REPL Commands
+### REPL Commands
 
 Any plain text input is treated as `/work <text>`.
 Pressing enter on an empty prompt defaults to `/work` and asks for task text.
@@ -145,7 +135,7 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 
 Aliases: `q` (quit), `s` (drop), `w` (work), `m` (macro), `f` (fresh), `v` (view), `l` (log), `a` (activity), `r` (revert), `cost` (usage), `clear` (fresh).
 
-## Project Marker Files
+### Project Marker Files
 
 Any of the following marks a directory as a roundsman project:
 
@@ -175,7 +165,7 @@ Notes:
 - Unknown keys are preserved and passed into prompt metadata.
 - `"lock": true` skips project discovery for that marker.
 
-## Session State
+### Session State
 
 `roundsman` manages `session` automatically in each marker file:
 
@@ -186,7 +176,7 @@ Notes:
 
 You generally should not edit this by hand.
 
-## Global Config
+### Global Config
 
 Global config location:
 
@@ -232,7 +222,7 @@ Key settings:
 - `claudeBin`: executable name/path for Claude CLI
 - `ui.previewChars`: done-message preview length
 
-## Safety and Control Defaults
+### Safety and Control Defaults
 
 - Checkpoints are opt-in (`checkpoint.enabled: false`)
 - Git auto-init is opt-in (`checkpoint.autoInitGit: false`)
@@ -240,7 +230,7 @@ Key settings:
 - `/kill` is explicit for terminating active agents
 - Scope for git checkpoints is project path within repo
 
-## How Agent Turns Work
+### How Agent Turns Work
 
 Per turn, roundsman:
 
@@ -252,7 +242,7 @@ Per turn, roundsman:
 6. Saves result/cost/history back into project marker
 7. Optionally creates post-turn git checkpoint
 
-## Recommended Workflow
+### Recommended Workflow
 
 A pattern I use:
 
@@ -263,8 +253,6 @@ A pattern I use:
 5. Use `/snooze`, `/skip`, and `/drop` to keep the queue focused.
 6. Use `/loop` only for tightly scoped repeated work.
 
-That keeps momentum high without turning your terminal into a tab jungle.
-
-## License
+### License
 
 MIT
