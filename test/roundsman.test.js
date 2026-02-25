@@ -30,6 +30,7 @@ const {
   stopLoop,
   toProgressLine,
   applyStreamEvent,
+  hasSuccessfulTurn,
 } = require("../roundsman.js");
 
 test("normalizeSession defaults and trims history", () => {
@@ -260,10 +261,40 @@ test("applyStreamEvent updates result and usage fields", () => {
   assert.equal(s.sessionId, "abc");
 });
 
+test("applyStreamEvent supports wrapped stream events", () => {
+  const s = { result: "", cost: 0, turns: 0, sessionId: "" };
+  applyStreamEvent(s, {
+    event: { result: "done", total_cost_usd: 0.34, num_turns: 4, session_id: "sess" },
+  });
+  assert.equal(s.result, "done");
+  assert.equal(s.cost, 0.34);
+  assert.equal(s.turns, 4);
+  assert.equal(s.sessionId, "sess");
+});
+
+test("hasSuccessfulTurn requires at least one non-error result", () => {
+  assert.equal(hasSuccessfulTurn(normalizeConfig({ session: { history: [] } })), false);
+  assert.equal(
+    hasSuccessfulTurn(normalizeConfig({ session: { history: [{ result: "error: exit 1" }] } })),
+    false,
+  );
+  assert.equal(
+    hasSuccessfulTurn(normalizeConfig({ session: { history: [{ result: "ok" }, { result: "error: x" }] } })),
+    true,
+  );
+});
+
 test("isInputWaitEvent matches wait events and messages", () => {
   assert.equal(isInputWaitEvent({ type: "user_input_required" }), true);
   assert.equal(isInputWaitEvent({ type: "system", message: "Waiting for user input to continue" }), true);
   assert.equal(isInputWaitEvent({ type: "assistant", message: "continuing work" }), false);
+});
+
+test("isInputWaitEvent matches wrapped wait events", () => {
+  assert.equal(
+    isInputWaitEvent({ event: { type: "system", message: "Waiting for user input to continue" } }),
+    true,
+  );
 });
 
 test("createProjectConfig fails when marker already exists", () => {

@@ -1,85 +1,99 @@
-# 🔁 roundsman
+# roundsman
 
-A single-file REPL for managing AI agents across multiple projects. No tabs, no fancy CLI frameworks — just a round-robin loop that lets you dispatch work to Claude across your filesystem while you keep moving.
+I built `roundsman` because I found multi-project agent work noisy and exhausting. Too many tabs, too many terminals, too much context-switching overhead.
 
-## Why this
+I wanted one place where I could:
 
-If you already use tools like Aider, Cursor Background Agents, or GitHub Copilot Coding Agent, roundsman is a different shape: a local, terminal-first round-robin across many repos in one place. It is less about replacing those systems and more about giving you a lightweight way to coordinate many small concurrent tasks with explicit turn-taking and per-project state.
+- queue up several projects,
+- hand work to agents in each project,
+- keep moving while they run,
+- and get pulled back through projects in a clean round-robin loop.
 
-## How it works
+That is what this tool is.
 
-1. Drop one of these marker files in any project directory: `roundsman.json`, `roundsman`, `.roundsman`
-2. Run `roundsman` — it scans your home directory (or a path you specify) for those files
-3. For each project, you see its status and decide what to do
-4. When you tell a project to work, an agent spawns in the background
-5. While it works, you move to the next project
+## Why Round-Robin Agent Work
 
-Agents run as `claude -p` with full tool access. Optional git checkpoints can be enabled in global config.
+When you run one agent at a time, your focus often gets trapped in waiting.
+When you run many agents in ad-hoc tabs, you lose track of state.
+
+Round-robin is a practical middle path:
+
+- Each project gets a turn.
+- Background agents keep progressing while you make decisions elsewhere.
+- You always return to a single prompt with explicit project context.
+- Session state is persisted per project, so the loop stays coherent over time.
+
+`roundsman` does not try to replace your editor or agent tooling. It is an orchestration layer for people who are already coding with agents and want a calmer control surface.
+
+## What It Does
+
+- Scans for project markers: `roundsman.json`, `roundsman`, `.roundsman`
+- Builds a round-robin queue across discovered projects
+- Spawns Claude Code agents in project directories (`claude -p` stream mode)
+- Tracks per-project session continuity (`sessionId`, turn history, summary)
+- Supports reusable per-project macros
+- Supports loops for repeated objectives (`/loop` + `/stop`)
+- Supports manual control of running work (`/kill`, `/snooze`, `/drop`, `/skip`)
+- Shows recent cross-project live activity via `/activity`
+- Optionally creates git checkpoints before/after turns
+
+## Requirements
+
+- Node.js `>= 18`
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) available as `claude`
+
+Quick checks:
+
+```bash
+node -v
+claude --version
+```
 
 ## Install
+
+From this repository:
 
 ```bash
 npm install -g .
 ```
 
-Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` CLI) and Node 18+.
-
-From this repo directory, that command installs `roundsman` globally on your system. Verify with:
+Verify:
 
 ```bash
 which roundsman
 roundsman --help
 ```
 
-## Quickstart
+For local development without global install:
 
 ```bash
-mkdir -p ~/Code/my-project
+node roundsman.js --help
+```
+
+## Quickstart
+
+Create or mark projects:
+
+```bash
 roundsman add ~/Code/my-project
+roundsman init ~/Code/another-project
+```
+
+Run on a root path:
+
+```bash
 roundsman ~/Code
 ```
 
-Interactive setup:
+Or run with default scan roots (configured globally, or home directory if unset):
 
 ```bash
-roundsman init ~/Code/my-project
+roundsman
 ```
 
-## Global config
+## CLI Usage
 
-Optional global defaults live at:
-
-- `~/.roundsman/config.json`
-- or `$XDG_CONFIG_HOME/roundsman/config.json` when `XDG_CONFIG_HOME` is set
-
-Example:
-
-```json
-{
-  "scanRoots": ["~/Code/Personal", "~/Code/Work"],
-  "ignoreDirs": ["node_modules", "dist"],
-  "maxDepth": 10,
-  "maxHistory": 20,
-  "defaultModel": "claude-sonnet-4-5",
-  "apiKeyEnvVar": "ROUNDSMAN_ANTHROPIC_API_KEY",
-  "defaultPermissionMode": "acceptEdits",
-  "checkpoint": { "enabled": false, "preTurn": true, "postTurn": true, "autoInitGit": false },
-  "claudeBin": "claude",
-  "ui": { "showFullPath": true, "previewChars": 200 }
-}
-```
-
-Notes:
-
-- `defaultModel` maps to `claude --model <value>`
-- `apiKeyEnvVar` tells roundsman which env var to read and forward as `ANTHROPIC_API_KEY`
-- Prefer environment variables for keys; do not store raw keys in config files
-- Git behavior is opt-in: set `checkpoint.enabled: true` to enable checkpoints
-- `checkpoint.autoInitGit` controls whether roundsman should initialize git when a project is not already in a git worktree
-
-## Usage
-
-```
+```bash
 roundsman [path]
 roundsman add [dir]
 roundsman init [dir]
@@ -87,88 +101,53 @@ roundsman list [path]
 roundsman [path] --dry-run
 roundsman [path] --json
 roundsman [path] --no-color
+roundsman --help
 ```
 
-Scans `path` (default: `~`) for directories containing `roundsman.json`, `roundsman`, or `.roundsman`. For each project, you get a prompt:
+Behavior:
 
-```
-──────────────────────────────────────────────────────────
-  my-project  (/Users/you/Code/my-project)
-──────────────────────────────────────────────────────────
-  context: A web app for tracking habits
-  todos:   add dark mode | fix login bug
-  turn:    3
+- `list` scans and exits
+- `--dry-run` scans and prints without entering REPL
+- `--json` emits machine-readable scan output
+- `--no-color` disables ANSI output (`NO_COLOR` is also respected)
 
-  command (/work, /macro, /snooze, /drop, /quit) >
-```
+## REPL Commands
 
-At startup, roundsman prints effective config + the projects in round-robin order, then waits for enter before the loop begins.
-
-`roundsman add [dir]` creates a `roundsman.json` marker file in `dir` (default: current directory) with this default config:
-
-```json
-{
-  "prompt": "",
-  "todos": [],
-  "doing": [],
-  "done": []
-}
-```
-
-`roundsman init [dir]` does the same but asks for project prompt and initial todos first.
-
-`roundsman list [path]` scans and prints discovered projects, then exits.
-
-`--dry-run` scans and prints without entering the REPL.
-
-`--json` emits scan results as JSON (works with `list` and `--dry-run`).
-
-`--no-color` disables ANSI color output (also respects `NO_COLOR`).
-
-When projects are in git worktrees, roundsman labels them as `repo@branch` and warns if multiple entries point to the same `repo+branch`.
-
-## Safety defaults
-
-- Checkpoints are off by default (`checkpoint.enabled: false`)
-- Git auto-init is off by default (`checkpoint.autoInitGit: false`)
-- Checkpoints are scoped to the project path inside a repo, not the entire repo
-- `/stop` stops active loops only
-- `/kill` is explicit and stops any running agent
-
-### Commands
+Any plain text input is treated as `/work <text>`.
+Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 
 | Command | What it does |
-|---------|--------------|
-| `/work` | Prompt for a task, spawn a background agent |
-| `/loop N goal` | Repeat `goal` up to `N` turns (stops early on error) |
-| `/stop [project|all]` | Stop active loop for current project, target project, or all |
-| `/kill [project|all]` | Kill a running agent (loop or non-loop) |
-| `/loops` | List active loops |
-| `/usage` or `/cost` | Show total and per-project session cost |
-| `/model [name]` | Show/set runtime model override (`none` clears) |
-| `/macro [list]` | List saved macros for the current project |
-| `/macro save <name> <prompt>` | Save/update a reusable prompt macro |
-| `/macro show <name>` | Show a saved macro |
-| `/macro run <name> [extra]` | Run a macro (optionally with extra instruction) |
-| `/macro rm <name>` | Delete a macro |
-| `/skip [N]` | Skip current project for `N` rounds (default `1`) |
-| `/drop` | Remove this project for the rest of this run |
-| `/snooze N` | Pause this project for `N` (`s/m/h/d`, default unit minutes) |
-| `/fresh` or `/clear` | Reset session — clear history, new conversation |
-| `/view` | Show the full result of the last agent turn |
-| `/log` | Show all turn history (timestamps, costs, I/O) |
-| `/revert` | Git revert the last agent turn |
-| `/quit` | Kill running agents and exit |
-| `/status` | Show all projects and their states |
-| `/help` | Show available REPL commands |
-| `!<shell command>` | Run a shell command directly in the current project's directory |
+|---|---|
+| `/work` | Prompt for a task and spawn a background agent |
+| `/macro [list]` | List saved macros for current project |
+| `/macro save <name> <prompt>` | Save/update a macro |
+| `/macro show <name>` | Show macro text |
+| `/macro run <name> [extra]` | Run macro, optionally with extra instruction |
+| `/macro rm <name>` | Delete macro |
+| `/loop <n> <goal>` | Run the same goal up to `n` turns |
+| `/stop [project|all]` | Stop active loop(s) |
+| `/kill [project|all]` | Kill running agent(s), loop or non-loop |
+| `/loops` | Show active loops |
+| `/usage` or `/cost` | Show total and per-project cost |
+| `/model [name|none]` | Set or clear runtime model override |
+| `/skip [n]` | Move current project behind `n` idle turns |
+| `/snooze <n>[s|m|h|d]` | Snooze current project |
+| `/drop` | Drop current project for this run |
+| `/fresh` or `/clear` | Reset current project session |
+| `/view` | Show full last result for current project |
+| `/log` | Show turn history for current project |
+| `/activity [n]` | Show recent cross-project live agent output/events |
+| `/revert` | Revert last roundsman git turn commit |
+| `/status` | Show all project states (including dropped) |
+| `/help` | Show command help |
+| `/quit` | Stop running agents and exit |
+| `!<shell command>` | Run shell command in current project directory |
 
-Pressing enter defaults to `/work`.
-Any input without a leading `/` is also treated as `/work <your input>`.
+Aliases: `q` (quit), `s` (drop), `w` (work), `m` (macro), `f` (fresh), `v` (view), `l` (log), `a` (activity), `r` (revert), `cost` (usage), `clear` (fresh).
 
-## Project marker files
+## Project Marker Files
 
-Any of these files marks a project for roundsman:
+Any of the following marks a directory as a roundsman project:
 
 - `roundsman.json`
 - `roundsman`
@@ -176,7 +155,7 @@ Any of these files marks a project for roundsman:
 
 Blank files and `{}` are valid.
 
-Example `roundsman.json`:
+Example marker:
 
 ```json
 {
@@ -190,37 +169,101 @@ Example `roundsman.json`:
 }
 ```
 
-All fields are optional. You can add arbitrary keys as metadata — they'll be shown to you and passed to the agent.
+Notes:
 
-Set `"lock": true` to skip a project without removing the file.
+- Arrays default to empty arrays.
+- Unknown keys are preserved and passed into prompt metadata.
+- `"lock": true` skips project discovery for that marker.
 
-### Session state
+## Session State
 
-Roundsman tracks session state automatically in the `session` field:
+`roundsman` manages `session` automatically in each marker file:
 
-- `sessionId` — UUID for Claude conversation continuity across turns
-- `turn` — turn counter
-- `summary` — last agent output (shown on project display)
-- `history` — last 20 turns with timestamps, costs, inputs, and results
+- `sessionId`: UUID for conversation continuity
+- `turn`: turn counter
+- `summary`: recent summary
+- `history`: bounded turn history (`maxHistory`)
 
-You don't need to set any of these — they're managed by roundsman.
+You generally should not edit this by hand.
 
-## How agents work
+## Global Config
 
-Each agent turn:
+Global config location:
 
-1. Optionally checkpoints dirty state if git checkpoints are enabled
-2. Builds a prompt from your project marker file context + your input
-3. Runs `claude -p --output-format stream-json --permission-mode acceptEdits`
-4. On first turn, sets a session ID; on subsequent turns, resumes the conversation
-5. Parses the result, updates project state, and optionally checkpoints again
+- `~/.roundsman/config.json`
+- or `$XDG_CONFIG_HOME/roundsman/config.json`
 
-Agents run in the background. You get a notification when they finish:
+Example:
 
+```json
+{
+  "scanRoots": ["~/Code/Personal", "~/Code/Work"],
+  "ignoreDirs": ["node_modules", "dist"],
+  "maxDepth": 10,
+  "maxHistory": 20,
+  "defaultModel": "claude-sonnet-4-5",
+  "apiKeyEnvVar": "ROUNDSMAN_ANTHROPIC_API_KEY",
+  "defaultPermissionMode": "acceptEdits",
+  "defaultCommandStyle": "slash",
+  "checkpoint": {
+    "enabled": false,
+    "preTurn": true,
+    "postTurn": true,
+    "autoInitGit": false
+  },
+  "claudeBin": "claude",
+  "ui": {
+    "showFullPath": true,
+    "previewChars": 200
+  }
+}
 ```
-  [done] my-project ($0.0234)
-         Added dark mode toggle to settings page. Updated CSS variables...
-```
+
+Key settings:
+
+- `scanRoots`: default roots when no path arg is provided
+- `ignoreDirs`: directories excluded while scanning
+- `maxDepth`: scan depth limit
+- `maxHistory`: retained turn history per project
+- `defaultModel`: mapped to `claude --model`
+- `defaultPermissionMode`: passed to Claude `--permission-mode`
+- `apiKeyEnvVar`: env var to forward as `ANTHROPIC_API_KEY`
+- `checkpoint.*`: git checkpoint controls
+- `claudeBin`: executable name/path for Claude CLI
+- `ui.previewChars`: done-message preview length
+
+## Safety and Control Defaults
+
+- Checkpoints are opt-in (`checkpoint.enabled: false`)
+- Git auto-init is opt-in (`checkpoint.autoInitGit: false`)
+- `/stop` is loop-specific
+- `/kill` is explicit for terminating active agents
+- Scope for git checkpoints is project path within repo
+
+## How Agent Turns Work
+
+Per turn, roundsman:
+
+1. Optionally creates pre-turn git checkpoint
+2. Builds a prompt from marker context + your input
+3. Runs Claude in print stream-json mode with verbose streaming
+4. Uses session continuity when there is successful prior history
+5. Streams intermediate events into activity feed
+6. Saves result/cost/history back into project marker
+7. Optionally creates post-turn git checkpoint
+
+## Recommended Workflow
+
+A pattern I use:
+
+1. Start roundsman on a root with 3 to 8 active projects.
+2. Give each project one concrete task with `/work` or `/macro run`.
+3. Use `/activity` while waiting to see what agents are doing across the board.
+4. Use `/view` or `/log` for deep dives on a specific project.
+5. Use `/snooze`, `/skip`, and `/drop` to keep the queue focused.
+6. Use `/loop` only for tightly scoped repeated work.
+
+That keeps momentum high without turning your terminal into a tab jungle.
 
 ## License
 

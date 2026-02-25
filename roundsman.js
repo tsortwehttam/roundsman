@@ -41,6 +41,7 @@ const ANSI = {
 };
 const PROJECT_COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m"];
 const STREAM_PREVIEW_CHARS = 240;
+const MAX_ACTIVITY = 400;
 const OUTPUT = {
   color: true,
 };
@@ -139,11 +140,6 @@ function rmLog(msg = "") {
   for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
 }
 
-function userLog(msg = "") {
-  const prefix = `${style("[you]", ANSI.cyan)} ${style(">", ANSI.cyan)} `;
-  for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
-}
-
 function agentLog(project, msg = "") {
   const prefix = `${getProjectPrefix(project)} `;
   for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
@@ -171,40 +167,47 @@ function extractText(v) {
   return "";
 }
 
+function unwrapStreamEvent(evt) {
+  if (!evt || typeof evt !== "object") return null;
+  if (evt.event && typeof evt.event === "object") return evt.event;
+  return evt;
+}
+
 function toProgressLine(evt) {
-  if (!evt || typeof evt !== "object") return "";
+  const e = unwrapStreamEvent(evt);
+  if (!e) return "";
 
-  if (evt.type === "content_block_start" && evt.content_block && evt.content_block.type === "tool_use") {
-    const name = String(evt.content_block.name || "tool");
-    const input = previewText(stringifyMeta(evt.content_block.input || ""));
+  if (e.type === "content_block_start" && e.content_block && e.content_block.type === "tool_use") {
+    const name = String(e.content_block.name || "tool");
+    const input = previewText(stringifyMeta(e.content_block.input || ""));
     return `[step] ${name}${input ? ` ${input}` : ""}`;
   }
 
-  if (evt.type === "tool_use") {
-    const name = String(evt.name || "tool");
-    const input = previewText(stringifyMeta(evt.input || ""));
+  if (e.type === "tool_use") {
+    const name = String(e.name || "tool");
+    const input = previewText(stringifyMeta(e.input || ""));
     return `[step] ${name}${input ? ` ${input}` : ""}`;
   }
 
-  if (evt.type === "tool_result") {
-    const out = previewText(extractText(evt));
+  if (e.type === "tool_result") {
+    const out = previewText(extractText(e));
     if (!out) return "[output]";
     return `[output] ${out}`;
   }
 
-  if (evt.type === "assistant" || (evt.type === "message" && evt.role === "assistant")) {
-    const out = previewText(extractText(evt));
+  if (e.type === "assistant" || (e.type === "message" && e.role === "assistant")) {
+    const out = previewText(extractText(e));
     if (!out) return "";
     return `[agent] ${out}`;
   }
 
-  if (evt.type === "error") {
-    const out = previewText(extractText(evt) || stringifyMeta(evt.error || ""));
+  if (e.type === "error") {
+    const out = previewText(extractText(e) || stringifyMeta(e.error || ""));
     return `[error] ${out || "agent error"}`;
   }
 
-  if (evt.type === "system") {
-    const out = previewText(extractText(evt));
+  if (e.type === "system") {
+    const out = previewText(extractText(e));
     if (!out) return "";
     return `[system] ${out}`;
   }
@@ -213,10 +216,11 @@ function toProgressLine(evt) {
 }
 
 function isInputWaitEvent(evt) {
-  if (!evt || typeof evt !== "object") return false;
-  const t = typeof evt.type === "string" ? evt.type.toLowerCase() : "";
+  const e = unwrapStreamEvent(evt);
+  if (!e) return false;
+  const t = typeof e.type === "string" ? e.type.toLowerCase() : "";
   if (t.includes("input") && (t.includes("wait") || t.includes("request") || t.includes("required"))) return true;
-  const txt = extractText(evt).toLowerCase();
+  const txt = extractText(e).toLowerCase();
   if (!txt) return false;
   return txt.includes("waiting for user input") || txt.includes("awaiting user input") || txt.includes("user input required");
 }
@@ -230,6 +234,7 @@ function pushBufferedProgress(project, msg) {
 
 function emitProgress(project, msg) {
   if (!msg) return;
+  pushActivity(project, msg);
   if (project.holdStream === true) {
     pushBufferedProgress(project, msg);
     return;
@@ -246,13 +251,32 @@ function flushBufferedProgress(project) {
 }
 
 function applyStreamEvent(state, evt) {
-  if (!evt || typeof evt !== "object") return state;
+  const e = unwrapStreamEvent(evt);
+  if (!e) return state;
   const next = state;
-  if (typeof evt.result === "string") next.result = evt.result;
-  if (typeof evt.total_cost_usd === "number") next.cost = evt.total_cost_usd;
-  if (typeof evt.num_turns === "number") next.turns = evt.num_turns;
-  if (typeof evt.session_id === "string" && evt.session_id) next.sessionId = evt.session_id;
+  if (typeof e.result === "string") next.result = e.result;
+  if (typeof e.total_cost_usd === "number") next.cost = e.total_cost_usd;
+  if (typeof e.num_turns === "number") next.turns = e.num_turns;
+  if (typeof e.session_id === "string" && e.session_id) next.sessionId = e.session_id;
   return next;
+}
+
+function hasSuccessfulTurn(config) {
+  const hist = config && config.session && Array.isArray(config.session.history) ? config.session.history : [];
+  for (const h of hist) {
+    const r = h && typeof h.result === "string" ? h.result : "";
+    if (r && !r.startsWith("error:")) return true;
+  }
+  return false;
+}
+
+function pushActivity(project, msg) {
+  if (!msg) return;
+  if (!Array.isArray(project.activity)) project.activity = [];
+  project.activity.push({ at: nowIso(), msg: String(msg) });
+  if (project.activity.length > MAX_ACTIVITY) {
+    project.activity = project.activity.slice(-MAX_ACTIVITY);
+  }
 }
 
 function consumeStreamChunk(chunk, state, onLine) {
@@ -536,6 +560,7 @@ function setupProject(dir, globalConfig) {
     snoozeUntil: 0,
     holdStream: false,
     pendingStream: [],
+    activity: [],
   };
 }
 
@@ -679,13 +704,38 @@ function displayLog(project) {
   }
 }
 
-function displayStatus(projects) {
+function displayStatus(projects, includeDropped = false) {
   rmLog("status:");
   for (const p of projects) {
+    if (!includeDropped && p.state === "dropped") continue;
     const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : "✗";
     const loop = p.loop ? ` loop ${p.loop.done}/${p.loop.max}` : "";
     const snooze = p.state === "snoozed" ? ` ${formatMsShort(p.snoozeUntil - Date.now())}` : "";
     rmLog(`${icon} ${formatRepoTag(p).padEnd(30)} ${p.state}${snooze}${loop}`);
+  }
+}
+
+function displayActivity(projects, max = 30) {
+  const n = Number.isSafeInteger(max) && max > 0 ? max : 30;
+  const rows = [];
+  for (const p of projects) {
+    const items = Array.isArray(p.activity) ? p.activity : [];
+    for (const e of items) {
+      if (!e || typeof e !== "object") continue;
+      if (typeof e.at !== "string" || typeof e.msg !== "string") continue;
+      rows.push({ at: e.at, msg: e.msg, project: p });
+    }
+  }
+  rows.sort((a, b) => a.at.localeCompare(b.at));
+  const tail = rows.slice(-n);
+  if (!tail.length) {
+    rmLog("activity: no agent output yet");
+    return;
+  }
+  rmLog(`activity: last ${tail.length} event(s)`);
+  for (const row of tail) {
+    const t = row.at.slice(11, 19);
+    rmLog(`${t} ${formatRepoTag(row.project)} ${row.msg}`);
   }
 }
 
@@ -700,8 +750,8 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
   }
 
   const prompt = buildPrompt(config, userInput);
-  const isResume = config.session.turn > 0;
-  const args = ["-p", "--output-format", "stream-json", "--permission-mode", cfg.defaultPermissionMode];
+  const isResume = hasSuccessfulTurn(config);
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", cfg.defaultPermissionMode];
   const model = modelOverride || cfg.defaultModel;
   if (model) args.push("--model", model);
 
@@ -719,12 +769,19 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
     env.ANTHROPIC_API_KEY = process.env[cfg.apiKeyEnvVar];
   }
 
-  const proc = spawn(cfg.claudeBin, args, { cwd: dir, env, stdio: "pipe" });
+  const proc = spawn(cfg.claudeBin, args, { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   const stream = { lineBuf: "", result: "", cost: 0, turns: 0, sessionId: "", streamSeen: false };
   const stderrState = { lineBuf: "" };
   project.holdStream = false;
+  let waitStop = false;
+  function stopForInputWait() {
+    if (waitStop) return;
+    waitStop = true;
+    project.stopReason = "agent requested user input";
+    proc.kill();
+  }
 
   proc.stdout.on("data", (b) => {
     const chunk = String(b);
@@ -739,8 +796,9 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
       stream.streamSeen = true;
       applyStreamEvent(stream, evt);
       if (isInputWaitEvent(evt)) {
-        project.holdStream = true;
         emitProgress(project, "[wait] agent is waiting for user input; streaming paused");
+        project.holdStream = true;
+        stopForInputWait();
         return;
       }
       const msg = toProgressLine(evt);
@@ -754,8 +812,11 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
     consumeStreamChunk(chunk, stderrState, (line) => {
       const msg = previewText(line);
       if (!msg) return;
-      if (line.toLowerCase().includes("waiting for user input")) project.holdStream = true;
       emitProgress(project, `[stderr] ${msg}`);
+      if (line.toLowerCase().includes("waiting for user input")) {
+        project.holdStream = true;
+        stopForInputWait();
+      }
     });
   });
 
@@ -784,8 +845,9 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
       stream.streamSeen = true;
       applyStreamEvent(stream, evt);
       if (isInputWaitEvent(evt)) {
-        project.holdStream = true;
         emitProgress(project, "[wait] agent is waiting for user input; streaming paused");
+        project.holdStream = true;
+        stopForInputWait();
         return;
       }
       const msg = toProgressLine(evt);
@@ -817,7 +879,10 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
         }
       }
     } else {
-      result = `error: exit ${code} — ${stderr.trim().slice(0, 500)}`;
+      const err = stderr.trim().slice(0, 500);
+      const out = stdout.trim().slice(0, 500);
+      const detail = err || out;
+      result = `error: exit ${code} — ${detail}`;
     }
 
     // update summary from result
@@ -1104,6 +1169,7 @@ const REPL_ALIASES = {
   clear: "fresh",
   v: "view",
   l: "log",
+  a: "activity",
   r: "revert",
   cost: "usage",
 };
@@ -1188,7 +1254,7 @@ function displayScanOutput(roots, dirs, asJson) {
 }
 
 function displayReplHelp() {
-  rmLog("/work /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
+  rmLog("/work /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
 }
 
 function rotateQueue(queue, project) {
@@ -1241,9 +1307,19 @@ function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel)
 
 const REPL_COMMANDS = {
   quit: async function quit() { return "quit"; },
-  status: async function status(ctx) { displayStatus(ctx.projects); return "stay"; },
+  status: async function status(ctx) { displayStatus(ctx.projects, true); return "stay"; },
   loops: async function loops(ctx) { displayLoops(ctx.projects); return "stay"; },
   usage: async function usage(ctx) { displayUsage(ctx.projects, ctx.totalCost); return "stay"; },
+  activity: async function activity(ctx) {
+    const raw = ctx.arg.trim();
+    const n = raw ? Number(raw) : 30;
+    if (!Number.isSafeInteger(n) || n < 1) {
+      rmLog("-> usage: /activity [n>=1]");
+      return "stay";
+    }
+    displayActivity(ctx.projects, n);
+    return "stay";
+  },
   help: async function help() { displayReplHelp(); return "stay"; },
   model: async function model(ctx) {
     const next = ctx.arg.trim();
@@ -1346,7 +1422,7 @@ const REPL_COMMANDS = {
         return "stay";
       }
       rmLog(`macro ${name}:`);
-      userLog(body);
+      rmLog(body);
       return "stay";
     }
 
@@ -1365,7 +1441,6 @@ const REPL_COMMANDS = {
     const input = extra ? `${body}\n\nAdditional instruction: ${extra}` : body;
     flushBufferedProgress(ctx.project);
     ctx.project.holdStream = false;
-    userLog(input);
     rmLog(`-> starting agent for ${ctx.project.name} with macro "${name}"...`);
     spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
@@ -1434,7 +1509,6 @@ const REPL_COMMANDS = {
     }
     flushBufferedProgress(ctx.project);
     ctx.project.holdStream = false;
-    userLog(input);
     rmLog(`-> starting agent for ${ctx.project.name}...`);
     spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
@@ -1466,8 +1540,8 @@ function showHelp() {
     `Global config path: ${globalPath}`,
     "commands: add/init/list",
     "flags: --dry-run --json --no-color",
-    "repl: /work /macro /skip /drop /snooze /fresh /view /log /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
-    "Aliases: s=>drop, m=>macro, w/f/v/l/r/q, cost=>usage, clear=>fresh.",
+    "repl: /work /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
+    "Aliases: s=>drop, m=>macro, w/f/v/l/a/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
 }
@@ -1551,10 +1625,12 @@ async function main() {
     if (opts.stopped) {
       rmLog(`[stopped] ${formatProjectLabel(project)}`);
       agentLog(project, result);
+      pushActivity(project, `[stopped] ${result}`);
     } else {
       rmLog(`[done] ${formatProjectLabel(project)} ($${cost.toFixed(4)})`);
       const preview = result.slice(0, globalConfig.ui.previewChars).replace(/\n/g, " ");
       agentLog(project, preview || "(empty result)");
+      pushActivity(project, `[done] $${cost.toFixed(4)} ${preview || "(empty result)"}`);
     }
 
     if (!opts.stopped && project.loop) {
@@ -1641,13 +1717,11 @@ async function main() {
         rmLog("-> usage: !<shell command>");
         continue;
       }
-      userLog(`!${bang}`);
       runShellPassthrough(project, bang);
       continue;
     }
     const actionRaw = parseAction(rawInput);
     const { cmd, arg } = parseCommand(actionRaw);
-    if (rawInput) userLog(`/${actionRaw}`);
     const r = await runCommand({
       cmd,
       arg,
@@ -1690,6 +1764,7 @@ module.exports = {
   createProjectConfig,
   dropProject,
   formatRepoTag,
+  hasSuccessfulTurn,
   isInputWaitEvent,
   killProject,
   normalizeConfig,
