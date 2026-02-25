@@ -18,11 +18,14 @@ const {
   normalizeGlobalConfig,
   normalizeSession,
   parseAction,
+  parseBangInput,
   parseCliArgs,
   parseDurationMs,
   parseLoopCommand,
   parseTodoInput,
   refreshSnoozed,
+  rotateQueue,
+  skipProjectRounds,
   snoozeProject,
   stopLoop,
   toProgressLine,
@@ -48,11 +51,13 @@ test("normalizeConfig coerces list fields and defaults missing arrays", () => {
     todos: "one",
     doing: null,
     done: ["x", 2],
+    macros: { quick: "  do thing  ", bad: 3, "": "x" },
   });
 
   assert.deepEqual(c.todos, ["one"]);
   assert.deepEqual(c.doing, []);
   assert.deepEqual(c.done, ["x", "2"]);
+  assert.deepEqual(c.macros, { quick: "do thing" });
 });
 
 test("buildPrompt includes metadata and user instruction", () => {
@@ -80,6 +85,7 @@ test("buildPrompt does not render known keys as metadata", () => {
   const c = normalizeConfig({
     prompt: "ctx",
     lock: true,
+    macros: { audit: "check regression risks" },
     session: { summary: "s" },
   });
 
@@ -87,6 +93,7 @@ test("buildPrompt does not render known keys as metadata", () => {
 
   assert.doesNotMatch(out, /\n  prompt:/);
   assert.doesNotMatch(out, /\n  lock:/);
+  assert.doesNotMatch(out, /\n  macros:/);
   assert.doesNotMatch(out, /\n  session:/);
 });
 
@@ -94,7 +101,15 @@ test("parseAction supports slash syntax and aliases", () => {
   assert.equal(parseAction(""), "work");
   assert.equal(parseAction("/work"), "work");
   assert.equal(parseAction("/STATUS"), "STATUS");
-  assert.equal(parseAction("q"), "q");
+  assert.equal(parseAction("q"), "work q");
+  assert.equal(parseAction("fix login bug"), "work fix login bug");
+});
+
+test("parseBangInput extracts shell passthrough command", () => {
+  assert.equal(parseBangInput("!pwd"), "pwd");
+  assert.equal(parseBangInput("  !git status  "), "git status");
+  assert.equal(parseBangInput("!   "), "");
+  assert.equal(parseBangInput("/status"), null);
 });
 
 test("parseTodoInput splits comma separated todos", () => {
@@ -184,6 +199,7 @@ test("createProjectConfig writes default roundsman.json", () => {
     todos: [],
     doing: [],
     done: [],
+    macros: {},
   });
 });
 
@@ -194,6 +210,7 @@ test("buildProjectConfig applies prompt and todos", () => {
     todos: ["a"],
     doing: [],
     done: [],
+    macros: {},
   });
 });
 
@@ -308,4 +325,41 @@ test("dropProject removes from queue and marks dropped", () => {
   assert.equal(p.state, "dropped");
   assert.equal(p.snoozeUntil, 0);
   assert.equal(q.length, 0);
+});
+
+test("rotateQueue moves project to end when present", () => {
+  const a = { name: "a" };
+  const b = { name: "b" };
+  const c = { name: "c" };
+  const q = [a, b, c];
+  rotateQueue(q, a);
+  assert.deepEqual(q.map((x) => x.name), ["b", "c", "a"]);
+});
+
+test("rotateQueue is no-op when project missing", () => {
+  const a = { name: "a" };
+  const b = { name: "b" };
+  const q = [a];
+  rotateQueue(q, b);
+  assert.deepEqual(q.map((x) => x.name), ["a"]);
+});
+
+test("skipProjectRounds moves project after N idle projects", () => {
+  const a = { name: "a", state: "idle" };
+  const b = { name: "b", state: "idle" };
+  const c = { name: "c", state: "idle" };
+  const q = [a, b, c];
+  const moved = skipProjectRounds(q, a, 1);
+  assert.equal(moved, 1);
+  assert.deepEqual(q.map((x) => x.name), ["b", "a", "c"]);
+});
+
+test("skipProjectRounds caps at available idle projects", () => {
+  const a = { name: "a", state: "idle" };
+  const b = { name: "b", state: "idle" };
+  const c = { name: "c", state: "working" };
+  const q = [a, b, c];
+  const moved = skipProjectRounds(q, a, 5);
+  assert.equal(moved, 1);
+  assert.deepEqual(q.map((x) => x.name), ["b", "a", "c"]);
 });

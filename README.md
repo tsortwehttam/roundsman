@@ -99,7 +99,7 @@ Scans `path` (default: `~`) for directories containing `roundsman.json`, `rounds
   todos:   add dark mode | fix login bug
   turn:    3
 
-  command (/work, /snooze, /drop, /quit) >
+  command (/work, /macro, /snooze, /drop, /quit) >
 ```
 
 At startup, roundsman prints effective config + the projects in round-robin order, then waits for enter before the loop begins.
@@ -146,6 +146,12 @@ When projects are in git worktrees, roundsman labels them as `repo@branch` and w
 | `/loops` | List active loops |
 | `/usage` or `/cost` | Show total and per-project session cost |
 | `/model [name]` | Show/set runtime model override (`none` clears) |
+| `/macro [list]` | List saved macros for the current project |
+| `/macro save <name> <prompt>` | Save/update a reusable prompt macro |
+| `/macro show <name>` | Show a saved macro |
+| `/macro run <name> [extra]` | Run a macro (optionally with extra instruction) |
+| `/macro rm <name>` | Delete a macro |
+| `/skip [N]` | Skip current project for `N` rounds (default `1`) |
 | `/drop` | Remove this project for the rest of this run |
 | `/snooze N` | Pause this project for `N` (`s/m/h/d`, default unit minutes) |
 | `/fresh` or `/clear` | Reset session — clear history, new conversation |
@@ -155,8 +161,10 @@ When projects are in git worktrees, roundsman labels them as `repo@branch` and w
 | `/quit` | Kill running agents and exit |
 | `/status` | Show all projects and their states |
 | `/help` | Show available REPL commands |
+| `!<shell command>` | Run a shell command directly in the current project's directory |
 
 Pressing enter defaults to `/work`.
+Any input without a leading `/` is also treated as `/work <your input>`.
 
 ## Project marker files
 
@@ -175,7 +183,10 @@ Example `roundsman.json`:
   "prompt": "Short description of this project",
   "todos": ["thing to do"],
   "doing": [],
-  "done": []
+  "done": [],
+  "macros": {
+    "audit": "Review open changes for bugs, regressions, and missing tests."
+  }
 }
 ```
 

@@ -15,8 +15,9 @@ const DEFAULT_PROJECT_CONFIG = {
   todos: [],
   doing: [],
   done: [],
+  macros: {},
 };
-const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session"]);
+const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session", "macros"]);
 const DEFAULT_GLOBAL_CONFIG = {
   scanRoots: [],
   ignoreDirs: ["node_modules"],
@@ -36,6 +37,7 @@ const ANSI = {
   dim: "\x1b[2m",
   gray: "\x1b[90m",
   cyan: "\x1b[36m",
+  green: "\x1b[32m",
 };
 const PROJECT_COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m"];
 const STREAM_PREVIEW_CHARS = 240;
@@ -49,6 +51,18 @@ function normalizeList(v) {
   if (Array.isArray(v)) return v.map((x) => String(x));
   if (v === undefined || v === null || v === "") return [];
   return [String(v)];
+}
+
+function normalizeMacros(v) {
+  const raw = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  const out = {};
+  for (const [k, val] of Object.entries(raw)) {
+    const name = String(k).trim();
+    const body = typeof val === "string" ? val.trim() : "";
+    if (!name || !body) continue;
+    out[name] = body;
+  }
+  return out;
 }
 
 function nowIso() {
@@ -121,7 +135,7 @@ function rmLog(msg = "") {
     process.stdout.write("\n");
     return;
   }
-  const prefix = `${style("[rm]", `${ANSI.dim}${ANSI.gray}`)} `;
+  const prefix = `${style("[R]", `${ANSI.dim}${ANSI.gray}`)} `;
   for (const line of String(msg).split("\n")) process.stdout.write(`${prefix}${line}\n`);
 }
 
@@ -342,6 +356,7 @@ function normalizeConfig(v, maxHistory = MAX_HISTORY) {
     todos: normalizeList(val.todos),
     doing: normalizeList(val.doing),
     done: normalizeList(val.done),
+    macros: normalizeMacros(val.macros),
     session: normalizeSession(val.session, maxHistory),
   };
 }
@@ -856,7 +871,14 @@ function ask(rl, prompt) {
 function parseAction(input) {
   const raw = input.trim();
   if (!raw) return "work";
-  return raw.startsWith("/") ? raw.slice(1) : raw;
+  if (raw.startsWith("/")) return raw.slice(1);
+  return `work ${raw}`;
+}
+
+function parseBangInput(input) {
+  const raw = input.trim();
+  if (!raw.startsWith("!")) return null;
+  return raw.slice(1).trim();
 }
 
 function parseLoopCommand(action) {
@@ -873,6 +895,18 @@ function parseCommand(action) {
   const i = s.indexOf(" ");
   if (i < 0) return { cmd: s.toLowerCase(), arg: "" };
   return { cmd: s.slice(0, i).toLowerCase(), arg: s.slice(i + 1).trim() };
+}
+
+function runShellPassthrough(project, cmd) {
+  rmLog(`-> shell (${project.name}): ${cmd}`);
+  const out = spawnSync(cmd, { cwd: project.dir, shell: true, stdio: "inherit" });
+  if (out.error) {
+    rmLog(`-> shell error: ${out.error.message}`);
+    return;
+  }
+  if (typeof out.status === "number" && out.status !== 0) {
+    rmLog(`-> shell exit ${out.status}`);
+  }
 }
 
 function parseTodoInput(input) {
@@ -970,6 +1004,14 @@ function displayUsage(projects, totalCost) {
   }
 }
 
+function displayProjectCompact(project) {
+  const { config } = project;
+  const tag = formatRepoTag(project);
+  const doing = config.doing.length ? ` doing: ${config.doing[0]}` : "";
+  const turn = ` t${config.session.turn}`;
+  rmLog(`${tag}${turn}${doing}`);
+}
+
 function displayStartupConfig(globalConfig, roots, projects) {
   const active = projects.filter((p) => p.gitEnabled).length;
   const total = projects.length;
@@ -1056,8 +1098,8 @@ function snoozeProject(project, queue, ms) {
 const REPL_ALIASES = {
   q: "quit",
   s: "drop",
-  skip: "drop",
   w: "work",
+  m: "macro",
   f: "fresh",
   clear: "fresh",
   v: "view",
@@ -1146,39 +1188,63 @@ function displayScanOutput(roots, dirs, asJson) {
 }
 
 function displayReplHelp() {
-  rmLog("/work /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
+  rmLog("/work /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /revert /status /help /quit");
+}
+
+function rotateQueue(queue, project) {
+  const i = queue.indexOf(project);
+  if (i < 0) return;
+  queue.splice(i, 1);
+  queue.push(project);
+}
+
+function skipProjectRounds(queue, project, rounds = 1) {
+  const n = Number.isSafeInteger(rounds) && rounds > 0 ? rounds : 1;
+  const i = queue.indexOf(project);
+  if (i < 0) return 0;
+  queue.splice(i, 1);
+  const idle = queue.filter((p) => p.state === "idle");
+  if (!idle.length) {
+    queue.push(project);
+    return 0;
+  }
+  const steps = Math.min(n, idle.length);
+  const anchor = idle[steps - 1];
+  const j = queue.indexOf(anchor);
+  queue.splice(j + 1, 0, project);
+  return steps;
 }
 
 function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel) {
   const { project, projects, queue } = ctx;
   if (!sel || sel === "current" || sel === "this") {
     if (!apply(project, queue)) rmLog(`-> ${missingLabel} ${project.name}`);
-    return "handled";
+    return "stay";
   }
   if (sel === "all") {
     const count = projects.filter((p) => apply(p, queue)).length;
     if (!count) rmLog(`-> ${missingAllLabel}`);
-    return "handled";
+    return "stay";
   }
   const found = findProjectBySelector(projects, sel);
   if (found.kind === "none") {
     rmLog(`-> no project matched "${sel}"`);
-    return "handled";
+    return "stay";
   }
   if (found.kind === "many") {
     rmLog(`-> ambiguous project "${sel}": ${found.matches.map((p) => p.name).join(", ")}`);
-    return "handled";
+    return "stay";
   }
   if (!apply(found.matches[0], queue)) rmLog(`-> ${missingLabel} ${found.matches[0].name}`);
-  return "handled";
+  return "stay";
 }
 
 const REPL_COMMANDS = {
   quit: async function quit() { return "quit"; },
-  status: async function status(ctx) { displayStatus(ctx.projects); return "handled"; },
-  loops: async function loops(ctx) { displayLoops(ctx.projects); return "handled"; },
-  usage: async function usage(ctx) { displayUsage(ctx.projects, ctx.totalCost); return "handled"; },
-  help: async function help() { displayReplHelp(); return "handled"; },
+  status: async function status(ctx) { displayStatus(ctx.projects); return "stay"; },
+  loops: async function loops(ctx) { displayLoops(ctx.projects); return "stay"; },
+  usage: async function usage(ctx) { displayUsage(ctx.projects, ctx.totalCost); return "stay"; },
+  help: async function help() { displayReplHelp(); return "stay"; },
   model: async function model(ctx) {
     const next = ctx.arg.trim();
     if (!next) rmLog(`-> model: ${ctx.runtime.model || "(default cli model)"}`);
@@ -1189,7 +1255,7 @@ const REPL_COMMANDS = {
       ctx.runtime.model = next;
       rmLog(`-> runtime model set to ${ctx.runtime.model}`);
     }
-    return "handled";
+    return "stay";
   },
   stop: async function stop(ctx) {
     const sel = ctx.arg.trim();
@@ -1214,37 +1280,142 @@ const REPL_COMMANDS = {
   drop: async function drop(ctx) {
     dropProject(ctx.project, ctx.queue);
     rmLog(`-> dropped ${ctx.project.name}`);
-    return "handled";
+    return "next";
+  },
+  macro: async function macro(ctx) {
+    const raw = ctx.arg.trim();
+    const macros = ctx.project.config.macros;
+    const save = () => saveConfig(ctx.project.configPath, ctx.project.config);
+    const split = (s) => {
+      const i = s.indexOf(" ");
+      if (i < 0) return [s, ""];
+      return [s.slice(0, i), s.slice(i + 1).trim()];
+    };
+    const [subRaw, rest] = split(raw);
+    const sub = subRaw.toLowerCase();
+
+    if (!raw || sub === "list" || sub === "ls") {
+      const names = Object.keys(macros).sort();
+      if (!names.length) {
+        rmLog("(no macros)");
+        return "stay";
+      }
+      rmLog("macros:");
+      for (const name of names) rmLog(`- ${name}`);
+      return "stay";
+    }
+
+    if (sub === "save" || sub === "set" || sub === "add") {
+      const [nameRaw, text] = split(rest);
+      const name = nameRaw.trim();
+      if (!name || !text) {
+        rmLog("-> usage: /macro save <name> <prompt>");
+        return "stay";
+      }
+      macros[name] = text;
+      save();
+      rmLog(`-> saved macro "${name}"`);
+      return "stay";
+    }
+
+    if (sub === "rm" || sub === "del" || sub === "delete") {
+      const name = rest.trim();
+      if (!name) {
+        rmLog("-> usage: /macro rm <name>");
+        return "stay";
+      }
+      if (!macros[name]) {
+        rmLog(`-> macro not found: "${name}"`);
+        return "stay";
+      }
+      delete macros[name];
+      save();
+      rmLog(`-> removed macro "${name}"`);
+      return "stay";
+    }
+
+    if (sub === "show") {
+      const name = rest.trim();
+      if (!name) {
+        rmLog("-> usage: /macro show <name>");
+        return "stay";
+      }
+      const body = macros[name];
+      if (!body) {
+        rmLog(`-> macro not found: "${name}"`);
+        return "stay";
+      }
+      rmLog(`macro ${name}:`);
+      userLog(body);
+      return "stay";
+    }
+
+    const runParts = sub === "run" ? split(rest) : [subRaw, rest];
+    const name = runParts[0].trim();
+    const extra = runParts[1].trim();
+    if (!name) {
+      rmLog("-> usage: /macro run <name> [extra instruction]");
+      return "stay";
+    }
+    const body = macros[name];
+    if (!body) {
+      rmLog(`-> macro not found: "${name}"`);
+      return "stay";
+    }
+    const input = extra ? `${body}\n\nAdditional instruction: ${extra}` : body;
+    flushBufferedProgress(ctx.project);
+    ctx.project.holdStream = false;
+    userLog(input);
+    rmLog(`-> starting agent for ${ctx.project.name} with macro "${name}"...`);
+    spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
+    const i = ctx.queue.indexOf(ctx.project);
+    if (i >= 0) ctx.queue.splice(i, 1);
+    return "next";
+  },
+  skip: async function skip(ctx) {
+    const raw = ctx.arg.trim();
+    const rounds = raw ? Number(raw) : 1;
+    if (!Number.isSafeInteger(rounds) || rounds < 1) {
+      rmLog("-> usage: /skip [rounds>=1]");
+      return "stay";
+    }
+    const moved = skipProjectRounds(ctx.queue, ctx.project, rounds);
+    if (!moved) {
+      rmLog("-> no other idle projects to skip");
+      return "stay";
+    }
+    rmLog(`-> skipped ${ctx.project.name} for ${moved} round${moved === 1 ? "" : "s"}`);
+    return "shifted";
   },
   snooze: async function snooze(ctx) {
     const ms = parseDurationMs(ctx.arg);
     if (!ms) {
       rmLog("-> usage: /snooze <n>[s|m|h|d] (default unit: minutes)");
-      return "handled";
+      return "stay";
     }
     snoozeProject(ctx.project, ctx.queue, ms);
     rmLog(`-> snoozed ${ctx.project.name} for ${formatMsShort(ms)}`);
-    return "handled";
+    return "next";
   },
   fresh: async function fresh(ctx) {
     stopLoop(ctx.project, ctx.queue, "session reset");
     resetSession(ctx.project);
     rmLog(`-> reset session for ${ctx.project.name} (new sessionId, history cleared)`);
-    return "handled";
+    return "stay";
   },
-  view: async function view(ctx) { displayLastResult(ctx.project); return "handled"; },
-  log: async function log(ctx) { displayLog(ctx.project); return "handled"; },
+  view: async function view(ctx) { displayLastResult(ctx.project); return "stay"; },
+  log: async function log(ctx) { displayLog(ctx.project); return "stay"; },
   revert: async function revert(ctx) {
     const err = revertLastTurn(ctx.project);
     if (err) rmLog(`-> revert failed: ${err}`);
     else rmLog(`-> reverted last turn for ${ctx.project.name}`);
-    return "handled";
+    return "stay";
   },
   loop: async function loop(ctx) {
     const loop = parseLoopCommand(ctx.actionRaw);
     if (!loop) {
       rmLog("-> usage: /loop <n> <goal>");
-      return "handled";
+      return "stay";
     }
     ctx.project.loop = { max: loop.max, goal: loop.goal, done: 0 };
     flushBufferedProgress(ctx.project);
@@ -1253,13 +1424,13 @@ const REPL_COMMANDS = {
     spawnAgent(ctx.project, loop.goal, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
     if (i >= 0) ctx.queue.splice(i, 1);
-    return "handled";
+    return "next";
   },
   work: async function work(ctx) {
-    const input = (await ask(ctx.rl, "what to work on > ")).trim();
+    const input = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
     if (!input) {
       rmLog("-> no input, skipping");
-      return "handled";
+      return "stay";
     }
     flushBufferedProgress(ctx.project);
     ctx.project.holdStream = false;
@@ -1268,7 +1439,7 @@ const REPL_COMMANDS = {
     spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
     const i = ctx.queue.indexOf(ctx.project);
     if (i >= 0) ctx.queue.splice(i, 1);
-    return "handled";
+    return "next";
   },
 };
 
@@ -1295,8 +1466,8 @@ function showHelp() {
     `Global config path: ${globalPath}`,
     "commands: add/init/list",
     "flags: --dry-run --json --no-color",
-    "repl: /work /drop /snooze /fresh /view /log /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
-    "Aliases: s=>drop, w/f/v/l/r/q, cost=>usage, clear=>fresh.",
+    "repl: /work /macro /skip /drop /snooze /fresh /view /log /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
+    "Aliases: s=>drop, m=>macro, w/f/v/l/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
 }
@@ -1368,7 +1539,6 @@ async function main() {
   }
 
   let queue = [...projects]; // round-robin order
-  let idx = 0;
   let totalCost = 0;
   let wakeIdle = null;
   const runtime = { model: globalConfig.defaultModel };
@@ -1458,16 +1628,26 @@ async function main() {
       continue;
     }
 
-    // round-robin through idle projects
-    idx = idx % idle.length;
-    const project = idle[idx];
-    idx = (idx + 1) % Math.max(idle.length, 1);
+    // process idle projects in queue order
+    const project = idle[0];
 
-    displayProject(project);
+    rmLog();
+    displayProjectCompact(project);
 
-    const actionRaw = parseAction(await ask(rl, "command (/work, /loop, /stop, /kill, /help, /quit) > "));
+    const rawInput = (await ask(rl, `${ANSI.green}>${ANSI.reset} `)).trim();
+    const bang = parseBangInput(rawInput);
+    if (bang !== null) {
+      if (!bang) {
+        rmLog("-> usage: !<shell command>");
+        continue;
+      }
+      userLog(`!${bang}`);
+      runShellPassthrough(project, bang);
+      continue;
+    }
+    const actionRaw = parseAction(rawInput);
     const { cmd, arg } = parseCommand(actionRaw);
-    userLog(`/${actionRaw}`);
+    if (rawInput) userLog(`/${actionRaw}`);
     const r = await runCommand({
       cmd,
       arg,
@@ -1484,7 +1664,12 @@ async function main() {
       cleanup();
       break;
     }
-    if (r === "handled") continue;
+    if (r === "next") {
+      rotateQueue(queue, project);
+      continue;
+    }
+    if (r === "shifted") continue;
+    if (r === "stay") continue;
     rmLog("-> unknown command, try /help");
   }
 
@@ -1511,11 +1696,15 @@ module.exports = {
   normalizeGlobalConfig,
   normalizeSession,
   parseAction,
+  parseBangInput,
   parseCliArgs,
   parseDurationMs,
   parseLoopCommand,
   parseTodoInput,
   refreshSnoozed,
+  rotateQueue,
+  skipProjectRounds,
+  runShellPassthrough,
   snoozeProject,
   stopLoop,
   toProgressLine,
