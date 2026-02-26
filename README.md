@@ -1,6 +1,6 @@
 # Roundsman
 
-Roundsman is a Node.js-based CLI tool thatto make it easy to work on many projects with Claude at the same time. It is kept very, stupidly, simple on purpose. I do not like windows/panels/tabs, I do not like "TUI" theatrics, and I do not like tools that I have to remember more than 2 things to use. So, here's how you use it:
+Roundsman is a Node.js-based CLI tool to make it easy to work on many projects with Claude at the same time. It is kept very, stupidly, simple on purpose. I do not like windows/panels/tabs, I do not like "TUI" theatrics, and I do not like tools that I have to remember more than 2 things to use. So, here's how you use it:
 
 1. Put a `roundsman.json` in any folder you work on with Claude Code. Blank is fine, whatever
 2. Run `roundsman` from anywhere on your machine (after installing it, sir)
