@@ -1254,7 +1254,7 @@ function displayScanOutput(roots, dirs, asJson) {
 }
 
 function displayReplHelp() {
-  rmLog("/work /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
+  rmLog("/work /broadcast /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
 }
 
 function rotateQueue(queue, project) {
@@ -1279,6 +1279,11 @@ function skipProjectRounds(queue, project, rounds = 1) {
   const j = queue.indexOf(anchor);
   queue.splice(j + 1, 0, project);
   return steps;
+}
+
+function collectBroadcastTargets(projects) {
+  const list = Array.isArray(projects) ? projects : [];
+  return list.filter((p) => p && p.state === "idle");
 }
 
 function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel) {
@@ -1515,6 +1520,28 @@ const REPL_COMMANDS = {
     if (i >= 0) ctx.queue.splice(i, 1);
     return "next";
   },
+  broadcast: async function broadcast(ctx) {
+    const input = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
+    if (!input) {
+      rmLog("-> no input, skipping");
+      return "stay";
+    }
+    const targets = collectBroadcastTargets(ctx.projects);
+    if (!targets.length) {
+      rmLog("-> no idle projects to broadcast to");
+      return "stay";
+    }
+    rmLog(`-> broadcasting to ${targets.length} project(s)...`);
+    for (const p of targets) {
+      flushBufferedProgress(p);
+      p.holdStream = false;
+      rmLog(`-> starting agent for ${p.name}...`);
+      spawnAgent(p, input, ctx.onAgentDone, ctx.runtime.model);
+      const i = ctx.queue.indexOf(p);
+      if (i >= 0) ctx.queue.splice(i, 1);
+    }
+    return "stay";
+  },
 };
 
 async function runCommand(ctx) {
@@ -1540,7 +1567,7 @@ function showHelp() {
     `Global config path: ${globalPath}`,
     "commands: add/init/list",
     "flags: --dry-run --json --no-color",
-    "repl: /work /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
+    "repl: /work /broadcast /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
     "Aliases: s=>drop, m=>macro, w/f/v/l/a/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
@@ -1761,6 +1788,7 @@ module.exports = {
   buildProjectConfig,
   consumeStreamChunk,
   collectDuplicateRepoBranches,
+  collectBroadcastTargets,
   createProjectConfig,
   dropProject,
   formatRepoTag,

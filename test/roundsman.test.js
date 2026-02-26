@@ -7,6 +7,7 @@ const path = require("node:path");
 const {
   buildPrompt,
   buildProjectConfig,
+  collectBroadcastTargets,
   collectDuplicateRepoBranches,
   consumeStreamChunk,
   createProjectConfig,
@@ -393,4 +394,13 @@ test("skipProjectRounds caps at available idle projects", () => {
   const moved = skipProjectRounds(q, a, 5);
   assert.equal(moved, 1);
   assert.deepEqual(q.map((x) => x.name), ["b", "a", "c"]);
+});
+
+test("collectBroadcastTargets returns idle projects only", () => {
+  const a = { name: "a", state: "idle" };
+  const b = { name: "b", state: "working" };
+  const c = { name: "c", state: "snoozed" };
+  const d = { name: "d", state: "dropped" };
+  assert.deepEqual(collectBroadcastTargets([a, b, c, d]), [a]);
+  assert.deepEqual(collectBroadcastTargets(null), []);
 });

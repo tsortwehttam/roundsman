@@ -109,6 +109,7 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 | Command | What it does |
 |---|---|
 | `/work` | Prompt for a task and spawn a background agent |
+| `/broadcast` | Prompt for a task and run it across all idle projects |
 | `/macro [list]` | List saved macros for current project |
 | `/macro save <name> <prompt>` | Save/update a macro |
 | `/macro show <name>` | Show macro text |
