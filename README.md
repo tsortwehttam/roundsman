@@ -118,7 +118,7 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 | `/macro rm <name>` | Delete macro |
 | `/loop <n> <goal>` | Run the same goal up to `n` turns |
 | `/stop [project|all]` | Stop active loop(s) |
-| `/kill [project|all]` | Kill running agent(s), loop or non-loop |
+| `/kill [project|all]` | Kill running agent(s) and watcher process(es) |
 | `/loops` | Show active loops |
 | `/usage` or `/cost` | Show total and per-project cost |
 | `/model [name|none]` | Set or clear runtime model override |
