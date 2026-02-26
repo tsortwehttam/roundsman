@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function writeJson(obj) {
+  process.stdout.write(`${JSON.stringify(obj)}\n`);
+}
+
+async function main() {
+  if (process.env.ROUNDSMAN_MOCK_MODE === "wait-buffer") {
+    process.stdout.write(`${JSON.stringify({ type: "user_input_required", message: "waiting for user input" })}\n${JSON.stringify({ type: "assistant", text: "buffered after wait event" })}\n`);
+    return;
+  }
+
+  process.stderr.write("mock stderr line\n");
+  writeJson({ type: "assistant", text: "mock start" });
+  await sleep(25);
+  writeJson({ type: "tool_use", name: "bash", input: { cmd: "echo hi" } });
+  await sleep(25);
+  writeJson({ type: "tool_result", content: [{ text: "ok" }] });
+  await sleep(25);
+  writeJson({ result: "mock done", total_cost_usd: 0.01, num_turns: 1, session_id: "mock-session" });
+}
+
+main().catch((err) => {
+  process.stderr.write(`${err && err.message ? err.message : String(err)}\n`);
+  process.exit(1);
+});

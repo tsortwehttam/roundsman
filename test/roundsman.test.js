@@ -6,11 +6,13 @@ const path = require("node:path");
 
 const {
   buildPrompt,
+  buildMetaSnapshot,
   buildProjectConfig,
   collectBroadcastTargets,
   collectDuplicateRepoBranches,
   consumeStreamChunk,
   createProjectConfig,
+  initProjectConfig,
   dropProject,
   formatRepoTag,
   isInputWaitEvent,
@@ -25,6 +27,7 @@ const {
   parseDurationMs,
   parseLoopCommand,
   parseTodoInput,
+  buildInitSeed,
   refreshSnoozed,
   resolveHookAction,
   rotateQueue,
@@ -147,6 +150,29 @@ test("parseTodoInput splits comma separated todos", () => {
   assert.deepEqual(parseTodoInput(""), []);
 });
 
+test("buildInitSeed parses prompt/todos/watch/hooks", () => {
+  assert.deepEqual(
+    buildInitSeed({
+      prompt: "  app ",
+      todos: " a, b , ",
+      watch: "  yarn watch  ",
+      beforeVisit: "  !git status  ",
+      afterVisit: "  summarize  ",
+      afterWatchSuccess: "  !mailmaster wait  ",
+    }),
+    {
+      prompt: "app",
+      todos: ["a", "b"],
+      watch: "yarn watch",
+      hooks: {
+        beforeVisit: "!git status",
+        afterVisit: "summarize",
+        afterWatchSuccess: "!mailmaster wait",
+      },
+    },
+  );
+});
+
 test("parseCliArgs parses commands and flags", () => {
   assert.deepEqual(parseCliArgs(["add", "x"]), {
     command: "add",
@@ -261,6 +287,50 @@ test("formatRepoTag prefers repo@branch when available", () => {
   assert.equal(formatRepoTag({ name: "a", repoName: "", branch: "" }), "a");
 });
 
+test("buildMetaSnapshot captures queue and project tails", () => {
+  const p1 = {
+    name: "alpha",
+    dir: "/tmp/alpha",
+    configPath: "/tmp/alpha/roundsman.json",
+    state: "idle",
+    repoName: "repo-a",
+    repoRoot: "/tmp/repo-a",
+    branch: "main",
+    config: {
+      session: {
+        turn: 3,
+        summary: "done",
+        history: [
+          { at: "2026-01-01T00:00:00.000Z", result: "one", cost: 0.1, turns: 1, input: "do 1" },
+          { at: "2026-01-01T00:01:00.000Z", result: "two", cost: 0.2, turns: 1, input: "do 2" },
+        ],
+      },
+      todos: ["a"],
+      doing: [],
+      done: ["b"],
+      prompt: "ctx",
+      watch: "yarn watch",
+      hooks: { beforeVisit: "", afterVisit: "", afterWatchSuccess: "" },
+      macros: { audit: "check" },
+    },
+    activity: [{ at: "2026-01-01T00:02:00.000Z", msg: "line" }],
+  };
+  const p2 = {
+    ...p1,
+    name: "beta",
+    dir: "/tmp/beta",
+    configPath: "/tmp/beta/roundsman.json",
+  };
+  const out = buildMetaSnapshot([p1, p2], [p2, p1], p1, [{ goal: "x" }]);
+  assert.equal(out.currentProject, "alpha");
+  assert.deepEqual(out.queueOrder, ["beta", "alpha"]);
+  assert.equal(out.projects.length, 2);
+  assert.deepEqual(out.projects[0].macros, ["audit"]);
+  assert.equal(out.projects[0].history.length, 2);
+  assert.equal(out.projects[0].activity.length, 1);
+  assert.deepEqual(out.metaHistory, [{ goal: "x" }]);
+});
+
 test("collectDuplicateRepoBranches groups matching repo+branch", () => {
   const groups = collectDuplicateRepoBranches([
     { gitEnabled: true, repoRoot: "/r/a", repoName: "a", branch: "main", dir: "/r/a/w1" },
@@ -282,6 +352,21 @@ test("toProgressLine renders tool steps and outputs", () => {
   assert.equal(
     toProgressLine({ type: "tool_result", content: [{ text: "ok" }] }),
     "[output] ok",
+  );
+});
+
+test("toProgressLine renders delta text events", () => {
+  assert.equal(
+    toProgressLine({ type: "content_block_delta", delta: { text: "working on setup" } }),
+    "[agent] working on setup",
+  );
+});
+
+test("toProgressLine does not truncate agent text", () => {
+  const long = "x".repeat(500);
+  assert.equal(
+    toProgressLine({ type: "assistant", text: long }),
+    `[agent] ${long}`,
   );
 });
 
@@ -352,6 +437,51 @@ test("createProjectConfig creates missing target directories", () => {
   assert.equal(out.ok, true);
   assert.equal(fs.existsSync(dir), true);
   assert.equal(fs.existsSync(path.join(dir, "roundsman.json")), true);
+});
+
+test("initProjectConfig updates existing marker file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roundsman-test-"));
+  const marker = path.join(dir, ".roundsman");
+  fs.writeFileSync(marker, JSON.stringify({
+    prompt: "old",
+    todos: ["old todo"],
+    doing: ["active"],
+    done: ["done"],
+    macros: { quick: "ship" },
+    team: "infra",
+  }));
+  const out = initProjectConfig(dir, {
+    prompt: "ctx",
+    todos: ["a"],
+    watch: "yarn watch",
+    hooks: { beforeVisit: "!git status" },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.updated, true);
+  assert.equal(out.configPath, marker);
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, "utf-8")), {
+    prompt: "ctx",
+    todos: ["a"],
+    doing: ["active"],
+    done: ["done"],
+    watch: "yarn watch",
+    hooks: {
+      beforeVisit: "!git status",
+      afterVisit: "",
+      afterWatchSuccess: "",
+    },
+    macros: { quick: "ship" },
+    team: "infra",
+  });
+});
+
+test("initProjectConfig creates roundsman.json when marker missing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roundsman-test-"));
+  const out = initProjectConfig(dir, { prompt: "ctx" });
+  assert.equal(out.ok, true);
+  assert.equal(out.updated, false);
+  assert.equal(out.configPath, path.join(dir, "roundsman.json"));
+  assert.equal(fs.existsSync(out.configPath), true);
 });
 
 test("stopLoop kills loop process and requeues", () => {

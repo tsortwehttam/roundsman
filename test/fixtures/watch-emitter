@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function main() {
+  process.stdout.write("watch out 1\n");
+  process.stderr.write("watch err 1\n");
+  await sleep(30);
+  process.stdout.write("watch out 2\n");
+}
+
+main().catch((err) => {
+  process.stderr.write(`${err && err.message ? err.message : String(err)}\n`);
+  process.exit(1);
+});

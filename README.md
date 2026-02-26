@@ -97,6 +97,7 @@ roundsman --help
 Behavior:
 
 - `list` scans and exits
+- `init` prompts for project context, initial todos, watch command, and common hooks
 - `--dry-run` scans and prints without entering REPL
 - `--json` emits machine-readable scan output
 - `--no-color` disables ANSI output (`NO_COLOR` is also respected)
@@ -109,8 +110,11 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 | Command | What it does |
 |---|---|
 | `/work` | Prompt for a task and spawn a background agent |
+| `/workwait` | Prompt for a task, run it on current project, and wait here until it finishes |
 | `/watch` | Start this project's watch command and remove it from visits until it exits |
 | `/broadcast` | Prompt for a task and run it across all idle projects |
+| `/meta <goal>` | Run a dedicated meta-agent in a temp workspace with global roundsman/project/session context |
+| `/metawait <goal>` | Run meta-agent and block until it completes |
 | `/macro [list]` | List saved macros for current project |
 | `/macro save <name> <prompt>` | Save/update a macro |
 | `/macro show <name>` | Show macro text |
@@ -135,7 +139,23 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 | `/quit` | Stop running agents and exit |
 | `!<shell command>` | Run shell command in current project directory |
 
-Aliases: `q` (quit), `s` (drop), `w` (work), `m` (macro), `f` (fresh), `v` (view), `l` (log), `a` (activity), `r` (revert), `cost` (usage), `clear` (fresh).
+Aliases: `q` (quit), `s` (drop), `w` (work), `ww`/`work:wait` (workwait), `mw`/`meta:wait` (metawait), `m` (macro), `f` (fresh), `v` (view), `l` (log), `a` (activity), `r` (revert), `cost` (usage), `clear` (fresh).
+
+### Meta Agent Scratch Workspace
+
+`/meta <goal>` creates an ephemeral workspace under `/tmp/roundsman-meta-*` and runs a dedicated Claude session there.
+
+Roundsman writes:
+
+- `AGENTS.md` with meta-agent contract/instructions
+- `context/projects.json` with discovered project snapshots
+- `context/session.json` with current queue/state/activity snapshot
+- `context/meta-history.json` with recent meta run summaries
+- `projects/*` symlinks pointing at real project directories
+
+Meta runs are also appended to:
+
+- `~/.roundsman/meta-history.jsonl`
 
 ### Project Marker Files
 

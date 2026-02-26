@@ -48,6 +48,9 @@ const ANSI = {
 const PROJECT_COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m"];
 const STREAM_PREVIEW_CHARS = 240;
 const MAX_ACTIVITY = 400;
+const META_ACTIVITY_TAIL = 30;
+const META_SESSION_HISTORY_TAIL = 8;
+const META_HISTORY_TAIL = 20;
 const OUTPUT = {
   color: true,
 };
@@ -115,6 +118,11 @@ function expandHomePath(p) {
   return p;
 }
 
+function sanitizePathSegment(v) {
+  const s = String(v || "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return s || "project";
+}
+
 function setOutputColor(enabled) {
   OUTPUT.color = enabled === true;
 }
@@ -167,6 +175,15 @@ function previewText(v, max = STREAM_PREVIEW_CHARS) {
   return `${s.slice(0, max - 3)}...`;
 }
 
+function normalizeLine(v) {
+  return String(v || "").replace(/\s+/g, " ").trim();
+}
+
+function formatDoneLine(result) {
+  const s = String(result || "").replace(/\n/g, " ");
+  return s || "(empty result)";
+}
+
 function extractText(v) {
   if (!v) return "";
   if (typeof v === "string") return v;
@@ -211,7 +228,13 @@ function toProgressLine(evt) {
   }
 
   if (e.type === "assistant" || (e.type === "message" && e.role === "assistant")) {
-    const out = previewText(extractText(e));
+    const out = normalizeLine(extractText(e));
+    if (!out) return "";
+    return `[agent] ${out}`;
+  }
+
+  if (e.type === "content_block_delta" || e.type === "message_delta" || e.type === "text_delta") {
+    const out = normalizeLine(extractText(e.delta || e));
     if (!out) return "";
     return `[agent] ${out}`;
   }
@@ -263,6 +286,11 @@ function flushBufferedProgress(project) {
   agentLog(project, `[buffered] ${list.length} message(s) while waiting for user input`);
   for (const msg of list) agentLog(project, msg);
   project.pendingStream = [];
+}
+
+function flushAllBufferedProgress(projects) {
+  const list = Array.isArray(projects) ? projects : [];
+  for (const p of list) flushBufferedProgress(p);
 }
 
 function applyStreamEvent(state, evt) {
@@ -317,6 +345,37 @@ function resolveGlobalConfigPath() {
     return path.join(process.env.XDG_CONFIG_HOME, "roundsman", "config.json");
   }
   return path.join(os.homedir(), ".roundsman", "config.json");
+}
+
+function resolveMetaHistoryPath() {
+  return path.join(path.dirname(resolveGlobalConfigPath()), "meta-history.jsonl");
+}
+
+function ensureParentDir(filePath) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function loadMetaHistory(limit = META_HISTORY_TAIL) {
+  const file = resolveMetaHistoryPath();
+  if (!fs.existsSync(file)) return [];
+  const raw = fs.readFileSync(file, "utf-8");
+  if (!raw.trim()) return [];
+  const lines = raw.trim().split("\n").slice(-limit);
+  const out = [];
+  for (const line of lines) {
+    try {
+      const row = JSON.parse(line);
+      if (row && typeof row === "object" && !Array.isArray(row)) out.push(row);
+    } catch {}
+  }
+  return out;
+}
+
+function appendMetaHistory(row) {
+  const file = resolveMetaHistoryPath();
+  ensureParentDir(file);
+  fs.appendFileSync(file, `${JSON.stringify(row)}\n`, "utf-8");
 }
 
 function normalizeGlobalConfig(v) {
@@ -448,6 +507,39 @@ function createProjectConfig(dir, seed) {
   const configPath = path.join(target, "roundsman.json");
   saveConfig(configPath, buildProjectConfig(seed));
   return { ok: true, configPath };
+}
+
+function initProjectConfig(dir, seed) {
+  const target = path.resolve(dir || process.cwd());
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+  if (!fs.statSync(target).isDirectory()) return { ok: false, error: `not a directory: ${target}` };
+  const markerPath = resolveProjectConfigPath(target);
+  const seedConfig = buildProjectConfig(seed);
+  const configPath = markerPath || path.join(target, "roundsman.json");
+  if (!markerPath) {
+    saveConfig(configPath, seedConfig);
+    return { ok: true, configPath, updated: false };
+  }
+  let base = {};
+  try {
+    const raw = fs.readFileSync(markerPath, "utf-8").trim();
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) base = parsed;
+    }
+  } catch {}
+  const next = {
+    ...base,
+    prompt: seedConfig.prompt,
+    todos: seedConfig.todos,
+    watch: seedConfig.watch,
+    hooks: seedConfig.hooks,
+  };
+  next.doing = normalizeList(next.doing);
+  next.done = normalizeList(next.done);
+  next.macros = normalizeMacros(next.macros);
+  saveConfig(configPath, next);
+  return { ok: true, configPath, updated: Boolean(markerPath) };
 }
 
 // ── Discovery & Setup ──────────────────────────────────────
@@ -762,6 +854,91 @@ function displayActivity(projects, max = 30) {
   }
 }
 
+function buildMetaSnapshot(projects, queue, currentProject, history) {
+  const order = Array.isArray(queue) ? queue.map((p) => p.name) : [];
+  const list = Array.isArray(projects) ? projects : [];
+  return {
+    generatedAt: nowIso(),
+    currentProject: currentProject ? currentProject.name : "",
+    queueOrder: order,
+    projects: list.map((p) => ({
+      name: p.name,
+      dir: p.dir,
+      configPath: p.configPath,
+      state: p.state,
+      repoName: p.repoName,
+      repoRoot: p.repoRoot,
+      branch: p.branch,
+      turn: p.config.session.turn,
+      summary: p.config.session.summary,
+      todos: p.config.todos,
+      doing: p.config.doing,
+      done: p.config.done,
+      prompt: p.config.prompt,
+      watch: p.config.watch,
+      hooks: p.config.hooks,
+      macros: Object.keys(p.config.macros),
+      history: p.config.session.history.slice(-META_SESSION_HISTORY_TAIL),
+      activity: Array.isArray(p.activity) ? p.activity.slice(-META_ACTIVITY_TAIL) : [],
+    })),
+    metaHistory: Array.isArray(history) ? history : [],
+  };
+}
+
+function buildMetaAgentsDoc() {
+  return [
+    "# Meta Agent Workspace",
+    "",
+    "This workspace is generated by roundsman `/meta`.",
+    "",
+    "Use:",
+    "- `context/projects.json` for discovered roundsman projects",
+    "- `context/session.json` for queue/state snapshot",
+    "- `context/meta-history.json` for prior `/meta` run summaries",
+    "- `projects/*` symlinks for direct project access",
+    "",
+    "Constraints:",
+    "- Prefer minimal, robust changes",
+    "- Avoid unrelated edits",
+    "- If asked to initialize roundsman in a project, create `roundsman.json` with sane defaults and a practical `watch` command when relevant",
+    "- End with concise summary and concrete file paths changed",
+    "",
+  ].join("\n");
+}
+
+function createMetaWorkspace(snapshot, goal) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "roundsman-meta-"));
+  const contextDir = path.join(root, "context");
+  const linksDir = path.join(root, "projects");
+  fs.mkdirSync(contextDir, { recursive: true });
+  fs.mkdirSync(linksDir, { recursive: true });
+  fs.writeFileSync(path.join(root, "AGENTS.md"), buildMetaAgentsDoc(), "utf-8");
+  fs.writeFileSync(path.join(root, "context", "session.json"), `${JSON.stringify(snapshot, null, 2)}\n`, "utf-8");
+  fs.writeFileSync(path.join(root, "context", "projects.json"), `${JSON.stringify(snapshot.projects, null, 2)}\n`, "utf-8");
+  fs.writeFileSync(path.join(root, "context", "meta-history.json"), `${JSON.stringify(snapshot.metaHistory, null, 2)}\n`, "utf-8");
+  fs.writeFileSync(path.join(root, "context", "goal.txt"), `${goal.trim()}\n`, "utf-8");
+
+  const names = new Set();
+  for (const p of snapshot.projects) {
+    const base = sanitizePathSegment(p.name || path.basename(p.dir));
+    let name = base;
+    let n = 2;
+    while (names.has(name)) {
+      name = `${base}-${n}`;
+      n += 1;
+    }
+    names.add(name);
+    fs.symlinkSync(p.dir, path.join(linksDir, name), "dir");
+  }
+
+  return {
+    dir: root,
+    agentsPath: path.join(root, "AGENTS.md"),
+    sessionPath: path.join(root, "context", "session.json"),
+    projectsPath: path.join(root, "context", "projects.json"),
+  };
+}
+
 // ── Background Agent ───────────────────────────────────────
 
 function spawnAgent(project, userInput, onDone, modelOverride) {
@@ -1003,6 +1180,177 @@ function spawnWatcher(project, onDone) {
   return true;
 }
 
+function runMetaAgent(goal, ctx) {
+  return new Promise((resolve) => {
+    const hist = loadMetaHistory(META_HISTORY_TAIL);
+    const snap = buildMetaSnapshot(ctx.projects, ctx.queue, ctx.project, hist);
+    const workspace = createMetaWorkspace(snap, goal);
+    const cfg = ctx.project.globalConfig;
+
+    const args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", cfg.defaultPermissionMode];
+    const model = ctx.runtime.model || cfg.defaultModel;
+    if (model) args.push("--model", model);
+    const seedSessionId = randomUUID();
+    args.push("--session-id", seedSessionId);
+    args.push([
+      "You are roundsman's meta agent.",
+      `User goal: ${goal}`,
+      "",
+      "You are running in an ephemeral scratch workspace.",
+      `Read ${workspace.sessionPath} and ${workspace.projectsPath} first.`,
+      `Use ${workspace.agentsPath} as your instruction contract.`,
+      "If you make project changes, apply them directly in the linked project directories.",
+      "Prioritize creating/updating roundsman project setup such as roundsman.json and watch scripts when useful.",
+      "Return a concise summary with exact changed files.",
+    ].join("\n"));
+
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    if (cfg.apiKeyEnvVar && process.env[cfg.apiKeyEnvVar]) {
+      env.ANTHROPIC_API_KEY = process.env[cfg.apiKeyEnvVar];
+    }
+
+    const metaProject = { name: "meta", dir: workspace.dir };
+    rmLog(`-> meta workspace: ${workspace.dir}`);
+    const proc = spawn(cfg.claudeBin, args, { cwd: workspace.dir, env, stdio: ["ignore", "pipe", "pipe"] });
+    ctx.runtime.metaProc = proc;
+    let done = false;
+    let stopReason = "";
+    function stopFor(reason) {
+      if (stopReason) return;
+      stopReason = reason;
+      proc.kill();
+    }
+    let stdout = "";
+    let stderr = "";
+    const stream = { lineBuf: "", result: "", cost: 0, turns: 0, sessionId: "", streamSeen: false };
+    const stderrState = { lineBuf: "" };
+
+    proc.stdout.on("data", (b) => {
+      const chunk = String(b);
+      stdout += chunk;
+      consumeStreamChunk(chunk, stream, (line) => {
+        let evt = null;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          return;
+        }
+        stream.streamSeen = true;
+        applyStreamEvent(stream, evt);
+        if (isInputWaitEvent(evt)) {
+          agentLog(metaProject, "[wait] meta agent requested user input; stopping this run");
+          stopFor("meta agent requested user input");
+          return;
+        }
+        const msg = toProgressLine(evt);
+        if (msg) agentLog(metaProject, msg);
+      });
+    });
+
+    proc.stderr.on("data", (b) => {
+      const chunk = String(b);
+      stderr += chunk;
+      consumeStreamChunk(chunk, stderrState, (line) => {
+        const msg = previewText(line);
+        if (msg) agentLog(metaProject, `[stderr] ${msg}`);
+        if (line.toLowerCase().includes("waiting for user input")) {
+          stopFor("meta agent requested user input");
+        }
+      });
+    });
+
+    proc.on("close", (code) => {
+      if (done) return;
+      done = true;
+      if (ctx.runtime.metaProc === proc) ctx.runtime.metaProc = null;
+      let result = "";
+      let cost = 0;
+      let turns = 0;
+
+      consumeStreamTail(stream, (line) => {
+        let evt = null;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          return;
+        }
+        stream.streamSeen = true;
+        applyStreamEvent(stream, evt);
+        const msg = toProgressLine(evt);
+        if (msg) agentLog(metaProject, msg);
+      });
+      consumeStreamTail(stderrState, (line) => {
+        const msg = previewText(line);
+        if (msg) agentLog(metaProject, `[stderr] ${msg}`);
+      });
+
+      if (stopReason) {
+        result = `stopped: ${stopReason}`;
+      } else if (code === 0 && stdout.trim()) {
+        if (stream.streamSeen) {
+          result = stream.result || "";
+          cost = stream.cost || 0;
+          turns = stream.turns || 0;
+        }
+        if (!result) {
+          try {
+            const json = JSON.parse(stdout.trim());
+            result = json.result || "";
+            if (!cost) cost = json.total_cost_usd || 0;
+            if (!turns) turns = json.num_turns || 0;
+          } catch {
+            result = stdout.trim().slice(0, 2000);
+          }
+        }
+      } else {
+        const err = stderr.trim().slice(0, 500);
+        const out = stdout.trim().slice(0, 500);
+        const detail = err || out;
+        result = `error: exit ${code} — ${detail}`;
+      }
+
+      const finalSession = stream.sessionId || seedSessionId;
+      appendMetaHistory({
+        at: nowIso(),
+        goal,
+        workspace: workspace.dir,
+        result: result.slice(0, 2000),
+        cost,
+        turns,
+        sessionId: finalSession,
+        status: result.startsWith("error:") ? "error" : "ok",
+      });
+
+      if (result.startsWith("error:")) rmLog(`-> meta failed (${workspace.dir})`);
+      else if (result.startsWith("stopped:")) rmLog(`-> meta stopped (${workspace.dir})`);
+      else rmLog(`-> meta complete ($${cost.toFixed(4)}) (${workspace.dir})`);
+      const preview = formatDoneLine(result);
+      if (preview) agentLog(metaProject, preview);
+      resolve();
+    });
+
+    proc.on("error", (err) => {
+      if (done) return;
+      done = true;
+      if (ctx.runtime.metaProc === proc) ctx.runtime.metaProc = null;
+      const msg = `spawn error: ${err.message}`;
+      appendMetaHistory({
+        at: nowIso(),
+        goal,
+        workspace: workspace.dir,
+        result: msg,
+        cost: 0,
+        turns: 0,
+        sessionId: seedSessionId,
+        status: "error",
+      });
+      rmLog(`-> meta failed: ${msg}`);
+      resolve();
+    });
+  });
+}
+
 // ── Readline Helpers ───────────────────────────────────────
 
 function createRl() {
@@ -1116,6 +1464,20 @@ function parseTodoInput(input) {
     .split(",")
     .map((x) => x.trim())
     .filter((x) => x);
+}
+
+function buildInitSeed(raw) {
+  const v = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    prompt: typeof v.prompt === "string" ? v.prompt.trim() : "",
+    todos: parseTodoInput(typeof v.todos === "string" ? v.todos : ""),
+    watch: typeof v.watch === "string" ? v.watch.trim() : "",
+    hooks: {
+      beforeVisit: typeof v.beforeVisit === "string" ? v.beforeVisit.trim() : "",
+      afterVisit: typeof v.afterVisit === "string" ? v.afterVisit.trim() : "",
+      afterWatchSuccess: typeof v.afterWatchSuccess === "string" ? v.afterWatchSuccess.trim() : "",
+    },
+  };
 }
 
 function parseCliArgs(args) {
@@ -1317,6 +1679,10 @@ const REPL_ALIASES = {
   q: "quit",
   s: "drop",
   w: "work",
+  ww: "workwait",
+  "work:wait": "workwait",
+  mw: "metawait",
+  "meta:wait": "metawait",
   m: "macro",
   f: "fresh",
   clear: "fresh",
@@ -1407,7 +1773,7 @@ function displayScanOutput(roots, dirs, asJson) {
 }
 
 function displayReplHelp() {
-  rmLog("/work /watch /broadcast /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
+  rmLog("/work /workwait /watch /broadcast /meta /metawait /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
 }
 
 function rotateQueue(queue, project) {
@@ -1437,6 +1803,25 @@ function skipProjectRounds(queue, project, rounds = 1) {
 function collectBroadcastTargets(projects) {
   const list = Array.isArray(projects) ? projects : [];
   return list.filter((p) => p && p.state === "idle");
+}
+
+function addProjectWaiter(runtime, project) {
+  if (!runtime || !project) return Promise.resolve();
+  if (!runtime.waiters) runtime.waiters = new Map();
+  return new Promise((resolve) => {
+    const key = project.dir || project.name;
+    const list = runtime.waiters.get(key) || [];
+    list.push(resolve);
+    runtime.waiters.set(key, list);
+  });
+}
+
+function resolveProjectWaiters(runtime, project) {
+  if (!runtime || !runtime.waiters || !project) return;
+  const key = project.dir || project.name;
+  const list = runtime.waiters.get(key) || [];
+  runtime.waiters.delete(key);
+  for (const done of list) done();
 }
 
 function runScopedProjectCommand(ctx, sel, apply, missingLabel, missingAllLabel) {
@@ -1476,6 +1861,50 @@ const REPL_COMMANDS = {
       return "stay";
     }
     displayActivity(ctx.projects, n);
+    return "stay";
+  },
+  meta: async function meta(ctx) {
+    const goal = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
+    if (!goal) {
+      rmLog("-> usage: /meta <goal>");
+      return "stay";
+    }
+    if (ctx.runtime.metaRunning) {
+      rmLog("-> meta agent already running");
+      return "stay";
+    }
+    rmLog("-> starting meta agent...");
+    ctx.runtime.metaRunning = true;
+    const p = runMetaAgent(goal, ctx).finally(() => {
+      ctx.runtime.metaRunning = false;
+      if (ctx.runtime.metaPromise === p) ctx.runtime.metaPromise = null;
+    });
+    ctx.runtime.metaPromise = p;
+    return "stay";
+  },
+  metawait: async function metawait(ctx) {
+    const goal = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
+    if (!goal) {
+      rmLog("-> usage: /metawait <goal>");
+      return "stay";
+    }
+    if (ctx.runtime.metaRunning) {
+      if (!ctx.runtime.metaPromise) {
+        rmLog("-> meta agent already running");
+        return "stay";
+      }
+      rmLog("-> waiting for active meta agent...");
+      await ctx.runtime.metaPromise;
+      return "stay";
+    }
+    rmLog("-> starting meta agent (wait)...");
+    ctx.runtime.metaRunning = true;
+    const p = runMetaAgent(goal, ctx).finally(() => {
+      ctx.runtime.metaRunning = false;
+      if (ctx.runtime.metaPromise === p) ctx.runtime.metaPromise = null;
+    });
+    ctx.runtime.metaPromise = p;
+    await p;
     return "stay";
   },
   help: async function help() { displayReplHelp(); return "stay"; },
@@ -1673,6 +2102,22 @@ const REPL_COMMANDS = {
     if (i >= 0) ctx.queue.splice(i, 1);
     return "next";
   },
+  workwait: async function workwait(ctx) {
+    const input = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
+    if (!input) {
+      rmLog("-> no input, skipping");
+      return "stay";
+    }
+    flushBufferedProgress(ctx.project);
+    ctx.project.holdStream = false;
+    rmLog(`-> starting agent for ${ctx.project.name} (wait)...`);
+    spawnAgent(ctx.project, input, ctx.onAgentDone, ctx.runtime.model);
+    const i = ctx.queue.indexOf(ctx.project);
+    if (i >= 0) ctx.queue.splice(i, 1);
+    await addProjectWaiter(ctx.runtime, ctx.project);
+    rmLog(`-> wait complete for ${ctx.project.name}`);
+    return "next";
+  },
   broadcast: async function broadcast(ctx) {
     const input = ctx.arg.trim() || (await ask(ctx.rl, `${ANSI.green}>${ANSI.reset} `)).trim();
     if (!input) {
@@ -1740,8 +2185,8 @@ function showHelp() {
     `Global config path: ${globalPath}`,
     "commands: add/init/list",
     "flags: --dry-run --json --no-color",
-    "repl: /work /watch /broadcast /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
-    "Aliases: s=>drop, m=>macro, w/f/v/l/a/r/q, cost=>usage, clear=>fresh.",
+    "repl: /work /workwait /watch /broadcast /meta /metawait /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
+    "Aliases: s=>drop, m=>macro, w/ww/work:wait/mw/meta:wait/f/v/l/a/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
 }
@@ -1768,15 +2213,41 @@ async function main() {
 
   if (cli.command === "init") {
     const rl = createRl();
-    const prompt = (await ask(rl, "project prompt (optional) > ")).trim();
-    const todosRaw = (await ask(rl, "initial todos (comma-separated, optional) > ")).trim();
+    console.log("Configure roundsman project fields (press enter to skip any field):");
+    const prompt = (await ask(
+      rl,
+      "project prompt: short project context used in agent prompts (e.g. API for invoice reconciliation) > ",
+    )).trim();
+    const todosRaw = (await ask(
+      rl,
+      "initial todos: starting task list, comma-separated (e.g. fix auth bug, add retry metrics) > ",
+    )).trim();
+    const watch = (await ask(
+      rl,
+      "watch command: long-running command for /watch mode (e.g. yarn dev or mailmaster wait --project acme) > ",
+    )).trim();
+    const beforeVisit = (await ask(
+      rl,
+      "hook beforeVisit: runs before each visit; use ! for shell (e.g. !git status --short or summarize current status) > ",
+    )).trim();
+    const afterVisit = (await ask(
+      rl,
+      "hook afterVisit: runs after each visit; use ! for shell (e.g. summarize changes made this turn) > ",
+    )).trim();
+    const afterWatchSuccess = (await ask(
+      rl,
+      "hook afterWatchSuccess: runs when watch exits 0; use ! for shell (e.g. review new events and summarize) > ",
+    )).trim();
     rl.close();
-    const out = createProjectConfig(cli.pathArg || process.cwd(), { prompt, todos: parseTodoInput(todosRaw) });
+    const out = initProjectConfig(
+      cli.pathArg || process.cwd(),
+      buildInitSeed({ prompt, todos: todosRaw, watch, beforeVisit, afterVisit, afterWatchSuccess }),
+    );
     if (!out.ok) {
       console.error(`Error: ${out.error}`);
       process.exit(1);
     }
-    console.log(`Created ${out.configPath}`);
+    console.log(`${out.updated ? "Updated" : "Created"} ${out.configPath}`);
     process.exit(0);
   }
 
@@ -1815,7 +2286,7 @@ async function main() {
   let queue = [...projects]; // round-robin order
   let totalCost = 0;
   let wakeIdle = null;
-  const runtime = { model: globalConfig.defaultModel };
+  const runtime = { model: globalConfig.defaultModel, metaRunning: false, metaPromise: null, metaProc: null, waiters: new Map() };
 
   function onAgentDone(project, result, cost, opts = { stopped: false }) {
     totalCost += cost;
@@ -1828,9 +2299,9 @@ async function main() {
       pushActivity(project, `[stopped] ${result}`);
     } else {
       rmLog(`[done] ${formatProjectLabel(project)} ($${cost.toFixed(4)})`);
-      const preview = result.slice(0, globalConfig.ui.previewChars).replace(/\n/g, " ");
-      agentLog(project, preview || "(empty result)");
-      pushActivity(project, `[done] $${cost.toFixed(4)} ${preview || "(empty result)"}`);
+      const preview = formatDoneLine(result);
+      agentLog(project, preview);
+      pushActivity(project, `[done] $${cost.toFixed(4)} ${preview}`);
     }
 
     if (!opts.stopped && project.loop) {
@@ -1852,6 +2323,7 @@ async function main() {
 
     // re-add to queue if not already there
     if (!queue.includes(project)) queue.push(project);
+    resolveProjectWaiters(runtime, project);
     if (wakeIdle) {
       const wake = wakeIdle;
       wakeIdle = null;
@@ -1860,6 +2332,10 @@ async function main() {
   }
 
   function cleanup() {
+    if (runtime.metaProc) {
+      runtime.metaProc.kill();
+      runtime.metaProc = null;
+    }
     for (const p of projects) {
       if (p.proc) { p.proc.kill(); p.proc = null; }
       if (p.watchProc) { p.watchStopReason = "shutdown"; p.watchProc.kill(); p.watchProc = null; }
@@ -1888,6 +2364,7 @@ async function main() {
       pushActivity(project, msg);
     }
     if (!queue.includes(project)) queue.push(project);
+    resolveProjectWaiters(runtime, project);
     if (wakeIdle) {
       const wake = wakeIdle;
       wakeIdle = null;
@@ -1903,6 +2380,7 @@ async function main() {
 
   while (true) {
     refreshSnoozed(projects, queue);
+    flushAllBufferedProgress(projects);
 
     // find next idle project
     const idle = queue.filter((p) => p.state === "idle");
@@ -1912,6 +2390,7 @@ async function main() {
 
     if (!idle.length && !working.length && !snoozed.length && !watching.length) {
       rmLog("All projects dropped or done. Exiting.");
+      cleanup();
       break;
     }
 
@@ -1989,12 +2468,14 @@ if (require.main === module) {
 
 module.exports = {
   applyStreamEvent,
+  buildMetaSnapshot,
   buildPrompt,
   buildProjectConfig,
   consumeStreamChunk,
   collectDuplicateRepoBranches,
   collectBroadcastTargets,
   createProjectConfig,
+  initProjectConfig,
   dropProject,
   formatRepoTag,
   hasSuccessfulTurn,
@@ -2010,6 +2491,7 @@ module.exports = {
   parseDurationMs,
   parseLoopCommand,
   parseTodoInput,
+  buildInitSeed,
   refreshSnoozed,
   resolveHookAction,
   rotateQueue,
