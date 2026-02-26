@@ -17,6 +17,7 @@ const {
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
+  normalizeHooks,
   normalizeSession,
   parseAction,
   parseBangInput,
@@ -25,6 +26,7 @@ const {
   parseLoopCommand,
   parseTodoInput,
   refreshSnoozed,
+  resolveHookAction,
   rotateQueue,
   skipProjectRounds,
   snoozeProject,
@@ -55,6 +57,7 @@ test("normalizeConfig coerces list fields and defaults missing arrays", () => {
     done: ["x", 2],
     macros: { quick: "  do thing  ", bad: 3, "": "x" },
     watch: "  ./wait.sh  ",
+    hooks: { afterWatchSuccess: "  summarize unread mail  " },
   });
 
   assert.deepEqual(c.todos, ["one"]);
@@ -62,6 +65,29 @@ test("normalizeConfig coerces list fields and defaults missing arrays", () => {
   assert.deepEqual(c.done, ["x", "2"]);
   assert.deepEqual(c.macros, { quick: "do thing" });
   assert.equal(c.watch, "./wait.sh");
+  assert.deepEqual(c.hooks, { beforeVisit: "", afterVisit: "", afterWatchSuccess: "summarize unread mail" });
+});
+
+test("normalizeHooks trims known fields and defaults missing hooks", () => {
+  assert.deepEqual(
+    normalizeHooks({ beforeVisit: "  !git status  ", afterWatchSuccess: "  summarize  " }),
+    { beforeVisit: "!git status", afterVisit: "", afterWatchSuccess: "summarize" },
+  );
+  assert.deepEqual(normalizeHooks(null), { beforeVisit: "", afterVisit: "", afterWatchSuccess: "" });
+});
+
+test("resolveHookAction uses ! for shell and plain text for prompt", () => {
+  const c = normalizeConfig({
+    hooks: {
+      beforeVisit: "!git status --short",
+      afterVisit: "summarize latest changes",
+      afterWatchSuccess: "!",
+    },
+  });
+  assert.deepEqual(resolveHookAction(c, "beforeVisit"), { type: "shell", value: "git status --short" });
+  assert.deepEqual(resolveHookAction(c, "afterVisit"), { type: "prompt", value: "summarize latest changes" });
+  assert.deepEqual(resolveHookAction(c, "afterWatchSuccess"), { type: "none", value: "" });
+  assert.deepEqual(resolveHookAction(c, "missing"), { type: "none", value: "" });
 });
 
 test("buildPrompt includes metadata and user instruction", () => {
@@ -204,6 +230,11 @@ test("createProjectConfig writes default roundsman.json", () => {
     doing: [],
     done: [],
     watch: "",
+    hooks: {
+      beforeVisit: "",
+      afterVisit: "",
+      afterWatchSuccess: "",
+    },
     macros: {},
   });
 });
@@ -216,6 +247,11 @@ test("buildProjectConfig applies prompt and todos", () => {
     doing: [],
     done: [],
     watch: "",
+    hooks: {
+      beforeVisit: "",
+      afterVisit: "",
+      afterWatchSuccess: "",
+    },
     macros: {},
   });
 });

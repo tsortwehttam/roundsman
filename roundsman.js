@@ -17,8 +17,13 @@ const DEFAULT_PROJECT_CONFIG = {
   done: [],
   macros: {},
   watch: "",
+  hooks: {
+    beforeVisit: "",
+    afterVisit: "",
+    afterWatchSuccess: "",
+  },
 };
-const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session", "macros", "watch"]);
+const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session", "macros", "watch", "hooks"]);
 const DEFAULT_GLOBAL_CONFIG = {
   scanRoots: [],
   ignoreDirs: ["node_modules"],
@@ -65,6 +70,15 @@ function normalizeMacros(v) {
     out[name] = body;
   }
   return out;
+}
+
+function normalizeHooks(v) {
+  const raw = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  return {
+    beforeVisit: typeof raw.beforeVisit === "string" ? raw.beforeVisit.trim() : "",
+    afterVisit: typeof raw.afterVisit === "string" ? raw.afterVisit.trim() : "",
+    afterWatchSuccess: typeof raw.afterWatchSuccess === "string" ? raw.afterWatchSuccess.trim() : "",
+  };
 }
 
 function nowIso() {
@@ -383,6 +397,7 @@ function normalizeConfig(v, maxHistory = MAX_HISTORY) {
     done: normalizeList(val.done),
     macros: normalizeMacros(val.macros),
     watch: typeof val.watch === "string" ? val.watch.trim() : "",
+    hooks: normalizeHooks(val.hooks),
     session: normalizeSession(val.session, maxHistory),
   };
 }
@@ -414,11 +429,13 @@ function buildProjectConfig(seed) {
   const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
   const todos = normalizeList(raw.todos).map((x) => x.trim()).filter((x) => x);
   const watch = typeof raw.watch === "string" ? raw.watch.trim() : "";
+  const hooks = normalizeHooks(raw.hooks);
   return {
     ...DEFAULT_PROJECT_CONFIG,
     prompt,
     todos,
     watch,
+    hooks,
   };
 }
 
@@ -1035,6 +1052,62 @@ function runShellPassthrough(project, cmd) {
   if (typeof out.status === "number" && out.status !== 0) {
     rmLog(`-> shell exit ${out.status}`);
   }
+}
+
+function resolveHookAction(config, hookName) {
+  const hooks = config && typeof config === "object" && config.hooks && typeof config.hooks === "object" && !Array.isArray(config.hooks)
+    ? config.hooks
+    : {};
+  const raw = typeof hooks[hookName] === "string" ? hooks[hookName].trim() : "";
+  if (!raw) return { type: "none", value: "" };
+  if (raw.startsWith("!")) {
+    const cmd = raw.slice(1).trim();
+    if (!cmd) return { type: "none", value: "" };
+    return { type: "shell", value: cmd };
+  }
+  return { type: "prompt", value: raw };
+}
+
+function runProjectHook(project, hookName, runtime, onAgentDone) {
+  const action = resolveHookAction(project.config, hookName);
+  if (action.type === "none") return { ran: false, startedAgent: false };
+  if (action.type === "shell") {
+    rmLog(`-> hook ${hookName} (${project.name}) shell: ${action.value}`);
+    const out = spawnSync(action.value, { cwd: project.dir, shell: true, encoding: "utf-8", stdio: "pipe" });
+    const stdout = typeof out.stdout === "string" ? out.stdout.trim() : "";
+    const stderr = typeof out.stderr === "string" ? out.stderr.trim() : "";
+    if (stdout) {
+      for (const line of stdout.split("\n")) {
+        const msg = previewText(line);
+        if (!msg) continue;
+        pushActivity(project, `[hook ${hookName}] ${msg}`);
+        agentLog(project, `[hook ${hookName}] ${msg}`);
+      }
+    }
+    if (stderr) {
+      for (const line of stderr.split("\n")) {
+        const msg = previewText(line);
+        if (!msg) continue;
+        pushActivity(project, `[hook ${hookName} stderr] ${msg}`);
+        agentLog(project, `[hook ${hookName} stderr] ${msg}`);
+      }
+    }
+    if (out.error) {
+      const msg = out.error.message || "shell hook failed";
+      rmLog(`-> hook ${hookName} error (${project.name}): ${msg}`);
+      pushActivity(project, `[hook ${hookName} error] ${msg}`);
+    } else if (typeof out.status === "number" && out.status !== 0) {
+      rmLog(`-> hook ${hookName} exit ${out.status} (${project.name})`);
+      pushActivity(project, `[hook ${hookName} exit] ${out.status}`);
+    }
+    return { ran: true, startedAgent: false };
+  }
+
+  rmLog(`-> hook ${hookName} (${project.name}) prompt`);
+  flushBufferedProgress(project);
+  project.holdStream = false;
+  spawnAgent(project, action.value, onAgentDone, runtime.model);
+  return { ran: true, startedAgent: true };
 }
 
 function parseTodoInput(input) {
@@ -1803,8 +1876,14 @@ async function main() {
       const msg = `[watch stopped] ${formatProjectLabel(project)}`;
       rmLog(msg);
       pushActivity(project, msg);
+    } else if (code === 0) {
+      const msg = `[watch ready] ${formatProjectLabel(project)} exit=0${signal ? ` signal=${signal}` : ""}`;
+      rmLog(msg);
+      pushActivity(project, msg);
+      const hook = runProjectHook(project, "afterWatchSuccess", runtime, onAgentDone);
+      if (hook.startedAgent) return;
     } else {
-      const msg = `[watch ready] ${formatProjectLabel(project)} exit=${code === null ? "?" : code}${signal ? ` signal=${signal}` : ""}`;
+      const msg = `[watch exit] ${formatProjectLabel(project)} exit=${code === null ? "?" : code}${signal ? ` signal=${signal}` : ""}`;
       rmLog(msg);
       pushActivity(project, msg);
     }
@@ -1923,6 +2002,7 @@ module.exports = {
   killProject,
   normalizeConfig,
   normalizeGlobalConfig,
+  normalizeHooks,
   normalizeSession,
   parseAction,
   parseBangInput,
@@ -1931,6 +2011,7 @@ module.exports = {
   parseLoopCommand,
   parseTodoInput,
   refreshSnoozed,
+  resolveHookAction,
   rotateQueue,
   skipProjectRounds,
   runShellPassthrough,

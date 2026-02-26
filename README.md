@@ -156,6 +156,9 @@ Example marker:
   "doing": [],
   "done": [],
   "watch": "mailmaster wait --project acme",
+  "hooks": {
+    "afterWatchSuccess": "Read the newest unread messages and summarize what matters."
+  },
   "macros": {
     "audit": "Review open changes for bugs, regressions, and missing tests."
   }
@@ -167,6 +170,10 @@ Notes:
 - Arrays default to empty arrays.
 - Unknown keys are preserved and passed into prompt metadata.
 - `"lock": true` skips project discovery for that marker.
+
+Hook values support two forms:
+- Starts with `!` => shell command in project directory
+- Otherwise => agent prompt via normal roundsman agent flow
 
 ### Session State
 
