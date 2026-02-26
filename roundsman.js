@@ -16,8 +16,9 @@ const DEFAULT_PROJECT_CONFIG = {
   doing: [],
   done: [],
   macros: {},
+  watch: "",
 };
-const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session", "macros"]);
+const KNOWN_KEYS = new Set(["prompt", "todos", "doing", "lock", "done", "session", "macros", "watch"]);
 const DEFAULT_GLOBAL_CONFIG = {
   scanRoots: [],
   ignoreDirs: ["node_modules"],
@@ -381,6 +382,7 @@ function normalizeConfig(v, maxHistory = MAX_HISTORY) {
     doing: normalizeList(val.doing),
     done: normalizeList(val.done),
     macros: normalizeMacros(val.macros),
+    watch: typeof val.watch === "string" ? val.watch.trim() : "",
     session: normalizeSession(val.session, maxHistory),
   };
 }
@@ -411,10 +413,12 @@ function buildProjectConfig(seed) {
   const raw = seed && typeof seed === "object" && !Array.isArray(seed) ? seed : {};
   const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
   const todos = normalizeList(raw.todos).map((x) => x.trim()).filter((x) => x);
+  const watch = typeof raw.watch === "string" ? raw.watch.trim() : "";
   return {
     ...DEFAULT_PROJECT_CONFIG,
     prompt,
     todos,
+    watch,
   };
 }
 
@@ -561,6 +565,8 @@ function setupProject(dir, globalConfig) {
     holdStream: false,
     pendingStream: [],
     activity: [],
+    watchProc: null,
+    watchStopReason: "",
   };
 }
 
@@ -708,7 +714,7 @@ function displayStatus(projects, includeDropped = false) {
   rmLog("status:");
   for (const p of projects) {
     if (!includeDropped && p.state === "dropped") continue;
-    const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : "✗";
+    const icon = p.state === "working" ? "⚙" : p.state === "idle" ? "·" : p.state === "snoozed" ? "~" : p.state === "watching" ? "⌛" : "✗";
     const loop = p.loop ? ` loop ${p.loop.done}/${p.loop.max}` : "";
     const snooze = p.state === "snoozed" ? ` ${formatMsShort(p.snoozeUntil - Date.now())}` : "";
     rmLog(`${icon} ${formatRepoTag(p).padEnd(30)} ${p.state}${snooze}${loop}`);
@@ -923,6 +929,63 @@ function spawnAgent(project, userInput, onDone, modelOverride) {
   project.state = "working";
 }
 
+function spawnWatcher(project, onDone) {
+  const cmd = typeof project.config.watch === "string" ? project.config.watch.trim() : "";
+  if (!cmd) return false;
+  if (project.watchProc) return true;
+
+  const proc = spawn(cmd, { cwd: project.dir, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+  const out = { lineBuf: "" };
+  const err = { lineBuf: "" };
+  project.watchStopReason = "";
+
+  proc.stdout.on("data", (b) => {
+    consumeStreamChunk(b, out, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      pushActivity(project, `[watch] ${msg}`);
+      agentLog(project, `[watch] ${msg}`);
+    });
+  });
+
+  proc.stderr.on("data", (b) => {
+    consumeStreamChunk(b, err, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      pushActivity(project, `[watch stderr] ${msg}`);
+      agentLog(project, `[watch stderr] ${msg}`);
+    });
+  });
+
+  proc.on("close", (code, signal) => {
+    consumeStreamTail(out, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      pushActivity(project, `[watch] ${msg}`);
+      agentLog(project, `[watch] ${msg}`);
+    });
+    consumeStreamTail(err, (line) => {
+      const msg = previewText(line);
+      if (!msg) return;
+      pushActivity(project, `[watch stderr] ${msg}`);
+      agentLog(project, `[watch stderr] ${msg}`);
+    });
+    const stop = project.watchStopReason;
+    project.watchStopReason = "";
+    project.watchProc = null;
+    onDone(project, { code, signal, stopped: stop !== "" });
+  });
+
+  proc.on("error", () => {
+    project.watchProc = null;
+    onDone(project, { code: null, signal: null, stopped: false });
+  });
+
+  project.watchProc = proc;
+  project.state = "watching";
+  return true;
+}
+
 // ── Readline Helpers ───────────────────────────────────────
 
 function createRl() {
@@ -1132,12 +1195,27 @@ function stopLoop(project, queue, why) {
   return true;
 }
 
+function stopWatcher(project, why) {
+  if (!project.watchProc) return false;
+  project.watchStopReason = why || "stopped";
+  project.watchProc.kill();
+  project.watchProc = null;
+  return true;
+}
+
 function killProject(project, queue, why) {
-  if (!project.proc) return false;
-  project.loop = null;
-  project.stopReason = why || "killed";
-  project.proc.kill();
-  project.proc = null;
+  let killed = false;
+  if (project.proc) {
+    project.loop = null;
+    project.stopReason = why || "killed";
+    project.proc.kill();
+    project.proc = null;
+    killed = true;
+  }
+  if (stopWatcher(project, why || "killed")) {
+    killed = true;
+  }
+  if (!killed) return false;
   project.state = "idle";
   project.snoozeUntil = 0;
   if (!queue.includes(project)) queue.push(project);
@@ -1146,6 +1224,7 @@ function killProject(project, queue, why) {
 
 function dropProject(project, queue) {
   stopLoop(project, queue, "dropped");
+  stopWatcher(project, "dropped");
   project.state = "dropped";
   project.snoozeUntil = 0;
   const i = queue.indexOf(project);
@@ -1154,6 +1233,7 @@ function dropProject(project, queue) {
 
 function snoozeProject(project, queue, ms) {
   stopLoop(project, queue, "snoozed");
+  stopWatcher(project, "snoozed");
   project.state = "snoozed";
   project.snoozeUntil = Date.now() + ms;
   const i = queue.indexOf(project);
@@ -1254,7 +1334,7 @@ function displayScanOutput(roots, dirs, asJson) {
 }
 
 function displayReplHelp() {
-  rmLog("/work /broadcast /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
+  rmLog("/work /watch /broadcast /macro /skip /loop /stop /kill /loops /usage /model /snooze /drop /fresh /view /log /activity /revert /status /help /quit");
 }
 
 function rotateQueue(queue, project) {
@@ -1542,6 +1622,26 @@ const REPL_COMMANDS = {
     }
     return "stay";
   },
+  watch: async function watch(ctx) {
+    if (ctx.project.watchProc) {
+      rmLog(`-> already watching ${ctx.project.name}`);
+      return "stay";
+    }
+    const cmd = typeof ctx.project.config.watch === "string" ? ctx.project.config.watch.trim() : "";
+    if (!cmd) {
+      rmLog(`-> no watch defined for ${ctx.project.name}`);
+      return "stay";
+    }
+    rmLog(`-> starting watcher for ${ctx.project.name}...`);
+    const ok = spawnWatcher(ctx.project, ctx.onWatchDone);
+    if (!ok) {
+      rmLog(`-> failed to start watcher for ${ctx.project.name}`);
+      return "stay";
+    }
+    const i = ctx.queue.indexOf(ctx.project);
+    if (i >= 0) ctx.queue.splice(i, 1);
+    return "next";
+  },
 };
 
 async function runCommand(ctx) {
@@ -1567,7 +1667,7 @@ function showHelp() {
     `Global config path: ${globalPath}`,
     "commands: add/init/list",
     "flags: --dry-run --json --no-color",
-    "repl: /work /broadcast /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
+    "repl: /work /watch /broadcast /macro /skip /drop /snooze /fresh /view /log /activity /loop /stop /kill /loops /usage /model /clear /revert /status /help /quit",
     "Aliases: s=>drop, m=>macro, w/f/v/l/a/r/q, cost=>usage, clear=>fresh.",
   ];
   console.log(lines.join("\n"));
@@ -1689,6 +1789,30 @@ async function main() {
   function cleanup() {
     for (const p of projects) {
       if (p.proc) { p.proc.kill(); p.proc = null; }
+      if (p.watchProc) { p.watchStopReason = "shutdown"; p.watchProc.kill(); p.watchProc = null; }
+    }
+  }
+
+  function onWatchDone(project, meta) {
+    const code = meta && Object.prototype.hasOwnProperty.call(meta, "code") ? meta.code : null;
+    const signal = meta && Object.prototype.hasOwnProperty.call(meta, "signal") ? meta.signal : null;
+    const stopped = meta && meta.stopped === true;
+    project.state = "idle";
+    project.watchProc = null;
+    if (stopped) {
+      const msg = `[watch stopped] ${formatProjectLabel(project)}`;
+      rmLog(msg);
+      pushActivity(project, msg);
+    } else {
+      const msg = `[watch ready] ${formatProjectLabel(project)} exit=${code === null ? "?" : code}${signal ? ` signal=${signal}` : ""}`;
+      rmLog(msg);
+      pushActivity(project, msg);
+    }
+    if (!queue.includes(project)) queue.push(project);
+    if (wakeIdle) {
+      const wake = wakeIdle;
+      wakeIdle = null;
+      wake();
     }
   }
 
@@ -1704,9 +1828,10 @@ async function main() {
     // find next idle project
     const idle = queue.filter((p) => p.state === "idle");
     const working = projects.filter((p) => p.state === "working");
+    const watching = projects.filter((p) => p.state === "watching");
     const snoozed = projects.filter((p) => p.state === "snoozed");
 
-    if (!idle.length && !working.length && !snoozed.length) {
+    if (!idle.length && !working.length && !snoozed.length && !watching.length) {
       rmLog("All projects dropped or done. Exiting.");
       break;
     }
@@ -1760,6 +1885,7 @@ async function main() {
       totalCost,
       runtime,
       onAgentDone,
+      onWatchDone,
     });
     if (r === "quit") {
       cleanup();

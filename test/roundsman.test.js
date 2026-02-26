@@ -54,12 +54,14 @@ test("normalizeConfig coerces list fields and defaults missing arrays", () => {
     doing: null,
     done: ["x", 2],
     macros: { quick: "  do thing  ", bad: 3, "": "x" },
+    watch: "  ./wait.sh  ",
   });
 
   assert.deepEqual(c.todos, ["one"]);
   assert.deepEqual(c.doing, []);
   assert.deepEqual(c.done, ["x", "2"]);
   assert.deepEqual(c.macros, { quick: "do thing" });
+  assert.equal(c.watch, "./wait.sh");
 });
 
 test("buildPrompt includes metadata and user instruction", () => {
@@ -201,6 +203,7 @@ test("createProjectConfig writes default roundsman.json", () => {
     todos: [],
     doing: [],
     done: [],
+    watch: "",
     macros: {},
   });
 });
@@ -212,6 +215,7 @@ test("buildProjectConfig applies prompt and todos", () => {
     todos: ["a"],
     doing: [],
     done: [],
+    watch: "",
     macros: {},
   });
 });
@@ -334,6 +338,27 @@ test("killProject kills non-loop process and requeues", () => {
   assert.equal(p.state, "idle");
   assert.equal(p.snoozeUntil, 0);
   assert.equal(p.stopReason, "requested");
+  assert.equal(killed, 1);
+  assert.deepEqual(q, [p]);
+});
+
+test("killProject kills watcher process and requeues", () => {
+  let killed = 0;
+  const q = [];
+  const p = {
+    name: "a",
+    loop: null,
+    proc: null,
+    watchProc: { kill() { killed += 1; } },
+    watchStopReason: "",
+    state: "watching",
+    snoozeUntil: 10,
+    stopReason: "",
+  };
+  assert.equal(killProject(p, q, "requested"), true);
+  assert.equal(p.state, "idle");
+  assert.equal(p.snoozeUntil, 0);
+  assert.equal(p.watchStopReason, "requested");
   assert.equal(killed, 1);
   assert.deepEqual(q, [p]);
 });

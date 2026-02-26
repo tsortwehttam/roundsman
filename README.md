@@ -109,6 +109,7 @@ Pressing enter on an empty prompt defaults to `/work` and asks for task text.
 | Command | What it does |
 |---|---|
 | `/work` | Prompt for a task and spawn a background agent |
+| `/watch` | Start this project's watch command and remove it from visits until it exits |
 | `/broadcast` | Prompt for a task and run it across all idle projects |
 | `/macro [list]` | List saved macros for current project |
 | `/macro save <name> <prompt>` | Save/update a macro |
@@ -154,6 +155,7 @@ Example marker:
   "todos": ["thing to do"],
   "doing": [],
   "done": [],
+  "watch": "mailmaster wait --project acme",
   "macros": {
     "audit": "Review open changes for bugs, regressions, and missing tests."
   }
